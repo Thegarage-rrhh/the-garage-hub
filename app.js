@@ -6,7 +6,7 @@
 const root = document.getElementById("root");
 
 // ---------- Revisión de configuración ----------
-if (!window.CONFIG || CONFIG.SUPABASE_URL.includes("PEGA_AQUI") || CONFIG.SUPABASE_KEY.includes("PEGA_AQUI")) {
+if (typeof CONFIG === "undefined" || CONFIG.SUPABASE_URL.includes("PEGA_AQUI") || CONFIG.SUPABASE_KEY.includes("PEGA_AQUI")) {
   root.innerHTML = `<div class="login"><div class="login-caja">
     <img src="logo.png" alt="The Garage">
     <div class="aviso">Falta configurar la conexión. Abre el archivo <b>config.js</b> y pega la URL y la llave de Supabase.</div>

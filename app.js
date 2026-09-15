@@ -222,7 +222,7 @@ function vistaProximamente(el, item) {
 // ---------- Vista: Inicio ----------
 async function vistaInicio(el) {
   const fecha = new Date().toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long", timeZone: "America/Bogota" });
-  const nombre = (perfil.nombre || "").split(" ")[0] || "equipo";
+  const nombre = perfil.nombre || "equipo";
   el.innerHTML = encabezado(`Hola, ${esc(nombre)}`, fecha.charAt(0).toUpperCase() + fecha.slice(1));
 
   if (perfil.rol !== "admin") {

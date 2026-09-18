@@ -1,6 +1,6 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 1
-//  Login · Roles · Empleados · Novedades · Cuentas
+//  THE GARAGE HUB · Fase 2
+//  Login · Roles · Empleados · Novedades · Cuentas · Asistencia
 // =====================================================
 
 const root = document.getElementById("root");
@@ -21,6 +21,7 @@ const sbAlta = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY, {
 });
 
 let perfil = null;
+let intervalo = null;
 
 // ---------- Utilidades ----------
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -38,6 +39,7 @@ function toast(msg, tipo = "ok") {
 
 function traducirError(error) {
   const m = error?.message || String(error);
+  if (error?.code === "P0001") return m;
   if (m.includes("Invalid login credentials")) return "Correo o contraseña incorrectos.";
   if (m.includes("Email not confirmed")) return "El correo no está confirmado. Desactiva 'Confirm email' en Supabase.";
   if (m.includes("already registered") || m.includes("already been registered")) return "Ya existe un usuario con ese correo.";
@@ -84,7 +86,8 @@ const MENU = {
     { grupo: "General", items: [{ id: "inicio", label: "Inicio", listo: true }] },
     { grupo: "Equipo", items: [
       { id: "empleados", label: "Empleados", listo: true },
-      { id: "asistencia", label: "Asistencia", fase: 2 },
+      { id: "asistencia", label: "Asistencia", listo: true },
+      { id: "jornada", label: "Mi jornada", listo: true },
       { id: "tareas", label: "Tareas", fase: 3 } ] },
     { grupo: "Operación", items: [
       { id: "inventarios", label: "Inventarios", fase: 4 },
@@ -101,7 +104,7 @@ const MENU = {
   empleado: [
     { grupo: "Mi día", items: [
       { id: "inicio", label: "Inicio", listo: true },
-      { id: "jornada", label: "Mi jornada", fase: 2 },
+      { id: "jornada", label: "Mi jornada", listo: true },
       { id: "mis-tareas", label: "Mis tareas", fase: 3 } ] },
     { grupo: "Consultas", items: [
       { id: "inventario", label: "Inventario", fase: 4 },
@@ -110,13 +113,17 @@ const MENU = {
   ]
 };
 
-const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas };
+const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia };
 
 // ---------- Sesión ----------
 async function iniciar() {
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) return mostrarLogin();
-  await cargarPerfil(session.user);
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) return mostrarLogin();
+    await cargarPerfil(session.user);
+  } catch (err) {
+    mostrarLogin("No se pudo conectar con Supabase: " + (err.message || err));
+  }
 }
 
 async function cargarPerfil(user) {
@@ -197,6 +204,7 @@ function mostrarApp() {
 
 function navegar() {
   if (!perfil) return;
+  if (intervalo) { clearInterval(intervalo); intervalo = null; }
   const menu = MENU[perfil.rol].flatMap((g) => g.items);
   let id = location.hash.replace("#", "") || "inicio";
   let item = menu.find((i) => i.id === id);
@@ -226,8 +234,7 @@ async function vistaInicio(el) {
   el.innerHTML = encabezado(`Hola, ${esc(nombre)}`, fecha.charAt(0).toUpperCase() + fecha.slice(1));
 
   if (perfil.rol !== "admin") {
-    el.innerHTML += `<div class="panel"><h2>Tu espacio de trabajo</h2>
-      <p style="margin:0">Muy pronto aquí vas a marcar tu entrada, salida, breaks y almuerzo, y a ver tus tareas del día con sus tiempos.</p></div>`;
+    await vistaJornada(el, false);
     return;
   }
 
@@ -481,6 +488,375 @@ async function pintarCuentas() {
       pintarCuentas();
     }
   };
+}
+
+// =====================================================
+//  FASE 2 · ASISTENCIA
+// =====================================================
+const TZ = "America/Bogota";
+const NOMBRE_MARCA = {
+  entrada: "Entrada", salida: "Salida", break_inicio: "Inicio de break", break_fin: "Fin de break",
+  almuerzo_inicio: "Inicio de almuerzo", almuerzo_fin: "Fin de almuerzo"
+};
+const DIAS_CORTOS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+const horaCorta = (ts) => (ts ? new Date(ts).toLocaleTimeString("es-CO", { hour: "numeric", minute: "2-digit", timeZone: TZ }) : "—");
+const fmtHora = (hhmm) => {
+  if (!hhmm) return "—";
+  const [h, m] = hhmm.split(":").map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "a. m." : "p. m."}`;
+};
+const aMin = (hhmm) => { if (!hhmm) return null; const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
+function minutosDelDia(ts) {
+  const partes = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ts));
+  return Number(partes.find((x) => x.type === "hour").value) * 60 + Number(partes.find((x) => x.type === "minute").value);
+}
+const duracion = (min) => { min = Math.max(0, Math.round(min)); const h = Math.floor(min / 60), m = min % 60; return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`; };
+const reloj = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60].map((n) => String(n).padStart(2, "0")).join(":");
+};
+const diaSemana = (iso) => new Date(iso + "T12:00:00").getDay();
+function sumarDias(iso, n) { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return d.toLocaleDateString("en-CA"); }
+function lunesDe(iso) { const dow = diaSemana(iso); return sumarDias(iso, dow === 0 ? -6 : 1 - dow); }
+
+// Calcula todo lo que pasó en un día a partir de las marcaciones
+function analizarDia(eventos, h, aj, esHoy) {
+  const r = { entrada: null, salida: null, breaks: [], almuerzos: [], estado: "sin_entrada", alertas: [], neto: 0, tardeMin: 0 };
+  const ahora = Date.now();
+  let abierto = null;
+  for (const e of eventos) {
+    const t = new Date(e.momento).getTime();
+    if (e.tipo === "entrada") { r.entrada = t; r.estado = "trabajando"; }
+    if (e.tipo === "salida") { r.salida = t; r.estado = "terminado"; }
+    if (e.tipo === "break_inicio" || e.tipo === "almuerzo_inicio") { abierto = { tipo: e.tipo.split("_")[0], ini: t }; r.estado = abierto.tipo; }
+    if ((e.tipo === "break_fin" || e.tipo === "almuerzo_fin") && abierto) {
+      (abierto.tipo === "break" ? r.breaks : r.almuerzos).push({ ini: abierto.ini, fin: t });
+      abierto = null; r.estado = "trabajando";
+    }
+  }
+  if (abierto) (abierto.tipo === "break" ? r.breaks : r.almuerzos).push({ ini: abierto.ini, fin: esHoy ? ahora : abierto.ini, abierto: true });
+
+  const dur = (x) => (x.fin - x.ini) / 60000;
+  r.minBreak = r.breaks.reduce((s, x) => s + dur(x), 0);
+  r.minAlm = r.almuerzos.reduce((s, x) => s + dur(x), 0);
+
+  if (r.entrada) {
+    const fin = r.salida ?? (esHoy ? ahora : null);
+    if (fin) r.neto = (fin - r.entrada) / 60000 - r.minBreak - r.minAlm;
+    if (h?.laboral && h.hora_entrada) {
+      const llegada = minutosDelDia(r.entrada), hora = aMin(h.hora_entrada);
+      if (llegada > hora + aj.minutos_tolerancia) { r.tardeMin = llegada - hora; r.alertas.push(`Llegó tarde (${r.tardeMin} min)`); }
+    }
+    r.breaks.forEach((b, i) => { if (!b.abierto && Math.round(dur(b)) > (h?.minutos_break ?? 10)) r.alertas.push(`Break ${i + 1}: ${Math.round(dur(b))} min`); });
+    r.almuerzos.forEach((a) => { if (!a.abierto && h?.minutos_almuerzo && Math.round(dur(a)) > h.minutos_almuerzo) r.alertas.push(`Almuerzo: ${Math.round(dur(a))} min`); });
+    if (r.salida && h?.hora_salida && minutosDelDia(r.salida) < aMin(h.hora_salida)) r.alertas.push("Salió antes");
+    if (!r.salida && !esHoy) r.alertas.push("No marcó salida");
+  }
+  return r;
+}
+
+// ---------- Vista empleado: Mi jornada ----------
+async function vistaJornada(el, conEncabezado = true) {
+  if (conEncabezado) el.innerHTML = encabezado("Mi jornada", "Marca tu entrada, breaks, almuerzo y salida.");
+  const cont = document.createElement("div");
+  cont.innerHTML = `<p class="vacio">Cargando…</p>`;
+  el.appendChild(cont);
+
+  const hoy = hoyISO(), lunes = lunesDe(hoy);
+  const [asis, hor, aju] = await Promise.all([
+    sb.from("asistencia").select("*").eq("empleado_id", perfil.id).gte("fecha", lunes).lte("fecha", hoy).order("momento"),
+    sb.from("horarios").select("*"),
+    sb.from("ajustes").select("*").maybeSingle()
+  ]);
+  const error = asis.error || hor.error;
+  if (error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+
+  const aj = aju.data || { minutos_tolerancia: 10, max_tardanzas_semana: 2 };
+  const eventos = asis.data, horarios = hor.data;
+  const h = horarios.find((x) => x.dia_semana === diaSemana(hoy));
+  const evHoy = eventos.filter((e) => e.fecha === hoy);
+
+  let tardes = 0;
+  for (let f = lunes; f <= hoy; f = sumarDias(f, 1)) {
+    const r = analizarDia(eventos.filter((e) => e.fecha === f), horarios.find((x) => x.dia_semana === diaSemana(f)), aj, f === hoy);
+    if (r.tardeMin) tardes++;
+  }
+
+  const maxB = h?.breaks_por_dia ?? 0;
+  const hayAlmuerzo = (h?.minutos_almuerzo ?? 0) > 0;
+  const r0 = analizarDia(evHoy, h, aj, true);
+  const trabajando = r0.estado === "trabajando";
+  const boton = (tipo, texto, activo, principal = false) =>
+    `<button class="btn btn-grande ${principal ? "btn-rojo" : ""}" data-marcar="${tipo}" ${activo ? "" : "disabled"}>${texto}</button>`;
+
+  const botones = [
+    boton("entrada", "Marcar entrada", r0.estado === "sin_entrada", true),
+    r0.estado === "break"
+      ? boton("break_fin", "Terminar break", true, true)
+      : boton("break_inicio", `Iniciar break · ${Math.max(0, maxB - r0.breaks.length)} de ${maxB}`, trabajando && r0.breaks.length < maxB),
+    hayAlmuerzo
+      ? (r0.estado === "almuerzo"
+        ? boton("almuerzo_fin", "Terminar almuerzo", true, true)
+        : boton("almuerzo_inicio", r0.almuerzos.length ? "Almuerzo tomado" : "Iniciar almuerzo", trabajando && !r0.almuerzos.length))
+      : "",
+    boton("salida", "Marcar salida", trabajando)
+  ].join("");
+
+  cont.innerHTML = `
+    <div class="jornada">
+      <div class="panel estado-jornada" id="estado-jornada"></div>
+      <div class="botones-jornada">${botones}</div>
+    </div>
+    <div class="cifras">
+      <div class="cifra"><b>${r0.breaks.length}/${maxB}</b><span>Breaks usados hoy (${h?.minutos_break ?? 10} min c/u)</span></div>
+      <div class="cifra"><b>${hayAlmuerzo ? (r0.almuerzos.length ? "Sí" : "No") : "—"}</b><span>${hayAlmuerzo ? `Almuerzo tomado (${h.minutos_almuerzo} min)` : "Hoy no hay almuerzo"}</span></div>
+      <div class="cifra ${tardes > aj.max_tardanzas_semana ? "cifra-alerta" : ""}"><b>${tardes}/${aj.max_tardanzas_semana}</b><span>Llegadas tarde esta semana</span></div>
+    </div>
+    <div class="panel"><h2>Marcaciones de hoy</h2>
+      ${evHoy.length ? `<ul class="linea-tiempo">${evHoy.map((e) => `<li><span>${horaCorta(e.momento)}</span>${NOMBRE_MARCA[e.tipo]}</li>`).join("")}</ul>`
+        : `<p class="vacio">Todavía no hay marcaciones hoy.</p>`}
+    </div>`;
+
+  const pintarEstado = () => {
+    const box = $("#estado-jornada", cont);
+    if (!box) { clearInterval(intervalo); return; }
+    const r = analizarDia(evHoy, h, aj, true);
+    let titulo, detalle, clase = "";
+    if (r.estado === "sin_entrada") {
+      titulo = "Aún no marcas entrada";
+      detalle = h?.laboral ? `Hoy tu horario es de ${fmtHora(h.hora_entrada)} a ${fmtHora(h.hora_salida)}` : "Hoy no es día laboral";
+    } else if (r.estado === "trabajando") {
+      titulo = "En turno"; clase = "ok";
+      detalle = `Tiempo trabajado hoy <b>${reloj(r.neto * 60000)}</b>`;
+    } else if (r.estado === "break" || r.estado === "almuerzo") {
+      const tramo = (r.estado === "break" ? r.breaks : r.almuerzos).at(-1);
+      const limite = (r.estado === "break" ? h?.minutos_break ?? 10 : h?.minutos_almuerzo ?? 60) * 60000;
+      const resta = limite - (Date.now() - tramo.ini);
+      titulo = r.estado === "break" ? "En break" : "En almuerzo";
+      clase = resta >= 0 ? "pausa" : "alerta";
+      detalle = resta >= 0 ? `Te quedan <b>${reloj(resta)}</b>` : `Te pasaste <b>${reloj(-resta)}</b>`;
+    } else {
+      titulo = "Jornada terminada";
+      detalle = `Trabajaste <b>${duracion(r.neto)}</b> hoy. ¡Buen trabajo!`;
+    }
+    box.className = `panel estado-jornada ${clase}`;
+    box.innerHTML = `<span class="estado-titulo">${titulo}</span><p>${detalle}</p>`;
+  };
+  pintarEstado();
+  if (intervalo) clearInterval(intervalo);
+  intervalo = setInterval(pintarEstado, 1000);
+
+  $(".botones-jornada", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-marcar]");
+    if (!b || b.disabled) return;
+    if (b.dataset.marcar === "salida" && !confirm("¿Seguro que quieres marcar la salida? Después no podrás marcar nada más hoy.")) return;
+    b.disabled = true;
+    const { error } = await sb.from("asistencia").insert({ tipo: b.dataset.marcar });
+    if (error) { b.disabled = false; return toast(traducirError(error), "error"); }
+    toast(`${NOMBRE_MARCA[b.dataset.marcar]} marcada a las ${horaCorta(Date.now())}`);
+    navegar();
+  });
+}
+
+// ---------- Vista admin: Asistencia ----------
+let semanaAsistencia = null;
+
+async function vistaAsistencia(el) {
+  if (!semanaAsistencia) semanaAsistencia = lunesDe(hoyISO());
+  const lunes = semanaAsistencia, sabado = sumarDias(lunes, 5), domingo = sumarDias(lunes, 6), hoy = hoyISO();
+
+  el.innerHTML = encabezado("Asistencia", `Semana del ${fechaCorta(lunes)} al ${fechaCorta(sabado)}`,
+    `<div class="acciones">
+      <button class="btn" data-sem="-7">← Anterior</button>
+      <button class="btn" data-sem="0">Esta semana</button>
+      <button class="btn" data-sem="7">Siguiente →</button>
+    </div>`) +
+    `<div id="reporte"><p class="vacio">Cargando…</p></div>
+     <div class="panel" id="config-horarios"><p class="vacio">Cargando horarios…</p></div>`;
+
+  $(".titulo-pagina .acciones", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-sem]");
+    if (!b) return;
+    semanaAsistencia = b.dataset.sem === "0" ? lunesDe(hoyISO()) : sumarDias(semanaAsistencia, Number(b.dataset.sem));
+    vistaAsistencia(el);
+  });
+
+  const [per, asis, hor, aju, nov] = await Promise.all([
+    sb.from("perfiles").select("id,nombre,email,cargo,rol,activo").order("nombre"),
+    sb.from("asistencia").select("*").gte("fecha", lunes).lte("fecha", domingo).order("momento"),
+    sb.from("horarios").select("*").order("dia_semana"),
+    sb.from("ajustes").select("*").maybeSingle(),
+    sb.from("novedades_empleado").select("*").lte("fecha_inicio", domingo).gte("fecha_fin", lunes)
+  ]);
+  const error = per.error || asis.error || hor.error || aju.error || nov.error;
+  if (error) { $("#reporte", el).innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+
+  const aj = aju.data || { minutos_tolerancia: 10, max_tardanzas_semana: 2 };
+  const horarios = hor.data;
+  const conMarcas = new Set(asis.data.map((e) => e.empleado_id));
+  const personas = per.data.filter((p) => (p.activo && p.rol === "empleado") || conMarcas.has(p.id));
+
+  const dias = [];
+  for (let i = 0; i < 7; i++) {
+    const f = sumarDias(lunes, i);
+    if (i < 6 || asis.data.some((e) => e.fecha === f)) dias.push(f);
+  }
+
+  if (!personas.length) {
+    $("#reporte", el).innerHTML = `<div class="panel"><p class="vacio">No hay empleados activos. Agrégalos en la sección Empleados.</p></div>`;
+  } else {
+    $("#reporte", el).innerHTML = personas.map((p) => {
+      let horas = 0, diasTrab = 0, tardes = 0;
+      const filas = dias.map((f) => {
+        const h = horarios.find((x) => x.dia_semana === diaSemana(f));
+        const ev = asis.data.filter((e) => e.empleado_id === p.id && e.fecha === f);
+        const r = analizarDia(ev, h, aj, f === hoy);
+        const novs = nov.data.filter((n) => n.empleado_id === p.id && n.fecha_inicio <= f && n.fecha_fin >= f);
+        if (r.entrada) { diasTrab++; horas += r.neto; }
+        if (r.tardeMin) tardes++;
+        const futuro = f > hoy;
+        const alertas = [
+          ...novs.map((n) => `<span class="chip chip-info">${esc(n.tipo)}</span>`),
+          ...r.alertas.map((a) => `<span class="chip chip-alerta">${esc(a)}</span>`),
+          (!r.entrada && !futuro && h?.laboral && !novs.length) ? `<span class="chip chip-alerta">Sin marcar</span>` : ""
+        ].join("");
+        return `<tr class="${futuro ? "fila-futura" : ""}">
+          <td><b>${DIAS_CORTOS[diaSemana(f)]}</b><span class="sub">${fechaCorta(f)}</span></td>
+          <td>${r.entrada ? horaCorta(r.entrada) : "—"}</td>
+          <td>${r.salida ? horaCorta(r.salida) : "—"}</td>
+          <td>${r.breaks.length ? `${r.breaks.length} · ${Math.round(r.minBreak)} min` : "—"}</td>
+          <td>${r.almuerzos.length ? `${Math.round(r.minAlm)} min` : "—"}</td>
+          <td>${r.entrada && r.neto ? duracion(r.neto) : "—"}</td>
+          <td><div class="chips">${alertas || (r.entrada ? `<span class="chip chip-ok">OK</span>` : "")}</div></td>
+          <td>${futuro ? "" : `<button class="btn btn-chico" data-detalle="${p.id}|${f}">Ver</button>`}</td>
+        </tr>`;
+      }).join("");
+      const excede = tardes > aj.max_tardanzas_semana;
+      return `<div class="panel">
+        <div class="resumen-emp">
+          <div><h2 style="margin:0">${esc(p.nombre || p.email)}</h2><span class="sub">${esc(p.cargo || "")}</span></div>
+          <div class="chips">
+            <span class="chip">${diasTrab} días</span>
+            <span class="chip">${duracion(horas)} trabajadas</span>
+            <span class="chip ${excede ? "chip-alerta fuerte" : tardes === aj.max_tardanzas_semana ? "chip-aviso" : ""}">
+              Llegadas tarde: ${tardes}/${aj.max_tardanzas_semana}${excede ? " · Supera el máximo" : ""}</span>
+          </div>
+        </div>
+        <div class="tabla-wrap"><table>
+          <thead><tr><th>Día</th><th>Entrada</th><th>Salida</th><th>Breaks</th><th>Almuerzo</th><th>Horas netas</th><th>Alertas</th><th></th></tr></thead>
+          <tbody>${filas}</tbody>
+        </table></div>
+      </div>`;
+    }).join("");
+
+    $("#reporte", el).onclick = (e) => {
+      const b = e.target.closest("[data-detalle]");
+      if (!b) return;
+      const [id, fecha] = b.dataset.detalle.split("|");
+      modalMarcaciones(per.data.find((x) => x.id === id), fecha, () => vistaAsistencia(el));
+    };
+  }
+
+  pintarConfigHorarios($("#config-horarios", el), horarios, aj);
+}
+
+// Detalle y corrección manual de marcaciones de un día
+async function modalMarcaciones(p, fecha, alCambiar) {
+  const { fondo } = abrirModal({
+    titulo: `${p.nombre || p.email} · ${DIAS_CORTOS[diaSemana(fecha)]} ${fechaCorta(fecha)}`,
+    sinPie: true,
+    cuerpo: `
+      <div class="tabla-wrap" id="lista-marcas"><p class="vacio">Cargando…</p></div>
+      <h4 class="subtitulo">Agregar marcación manual</h4>
+      <p class="ayuda" style="margin-top:-.5rem">Úsalo si el empleado olvidó marcar algo. Queda registrado como corrección del administrador.</p>
+      <div class="fila-form">
+        <div class="campo"><label>Tipo</label><select name="tipo">${Object.entries(NOMBRE_MARCA).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+        <div class="campo"><label>Hora</label><input type="time" name="hora" required></div>
+        <button class="btn btn-rojo" type="button" id="agregar-marca">Agregar</button>
+      </div>`
+  });
+
+  const pintar = async () => {
+    const { data, error } = await sb.from("asistencia").select("*").eq("empleado_id", p.id).eq("fecha", fecha).order("momento");
+    const cont = $("#lista-marcas", fondo);
+    if (error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+    if (!data.length) { cont.innerHTML = `<p class="vacio">No hay marcaciones este día.</p>`; return; }
+    cont.innerHTML = `<table><thead><tr><th>Hora</th><th>Marcación</th><th>Nota</th><th></th></tr></thead><tbody>
+      ${data.map((m) => `<tr><td>${horaCorta(m.momento)}</td><td>${NOMBRE_MARCA[m.tipo]}</td><td>${esc(m.nota || "—")}</td>
+        <td><button class="btn btn-chico btn-texto" data-borrar="${m.id}">Eliminar</button></td></tr>`).join("")}
+    </tbody></table>`;
+    cont.onclick = async (e) => {
+      const b = e.target.closest("[data-borrar]");
+      if (!b || !confirm("¿Eliminar esta marcación?")) return;
+      const { error } = await sb.from("asistencia").delete().eq("id", b.dataset.borrar);
+      if (error) return toast(traducirError(error), "error");
+      toast("Marcación eliminada"); pintar(); alCambiar();
+    };
+  };
+
+  $("#agregar-marca", fondo).addEventListener("click", async () => {
+    const tipo = $("[name=tipo]", fondo).value, hora = $("[name=hora]", fondo).value;
+    if (!hora) return toast("Escribe la hora de la marcación.", "error");
+    const momento = new Date(`${fecha}T${hora}:00-05:00`).toISOString();
+    const { error } = await sb.from("asistencia").insert({ empleado_id: p.id, tipo, momento, fecha, nota: "Corrección del administrador" });
+    if (error) return toast(traducirError(error), "error");
+    toast("Marcación agregada"); pintar(); alCambiar();
+  });
+  pintar();
+}
+
+// Configuración de horarios, tolerancia y máximo de llegadas tarde
+function pintarConfigHorarios(cont, horarios, aj) {
+  const orden = [1, 2, 3, 4, 5, 6, 0];
+  cont.innerHTML = `<details>
+    <summary><h2 style="display:inline;margin:0">Configurar horarios</h2></summary>
+    <div class="fila-form" style="margin:1rem 0">
+      <div class="campo"><label>Minutos de tolerancia para llegar</label><input type="number" min="0" id="aj-tol" value="${aj.minutos_tolerancia}"></div>
+      <div class="campo"><label>Máximo de llegadas tarde por semana</label><input type="number" min="0" id="aj-max" value="${aj.max_tardanzas_semana}"></div>
+    </div>
+    <div class="tabla-wrap"><table class="tabla-config">
+      <thead><tr><th>Día</th><th>Laboral</th><th>Entrada</th><th>Salida</th><th>Breaks</th><th>Min. break</th><th>Min. almuerzo</th></tr></thead>
+      <tbody>${orden.map((d) => {
+        const h = horarios.find((x) => x.dia_semana === d);
+        return `<tr data-dia="${d}">
+          <td><b>${esc(h.nombre_dia)}</b></td>
+          <td><input type="checkbox" name="laboral" ${h.laboral ? "checked" : ""} aria-label="Laboral"></td>
+          <td><input type="time" name="hora_entrada" value="${(h.hora_entrada || "").slice(0, 5)}"></td>
+          <td><input type="time" name="hora_salida" value="${(h.hora_salida || "").slice(0, 5)}"></td>
+          <td><input type="number" min="0" name="breaks_por_dia" value="${h.breaks_por_dia}"></td>
+          <td><input type="number" min="0" name="minutos_break" value="${h.minutos_break}"></td>
+          <td><input type="number" min="0" name="minutos_almuerzo" value="${h.minutos_almuerzo}"></td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>
+    <div style="margin-top:1rem"><button class="btn btn-rojo" id="guardar-horarios">Guardar horarios</button></div>
+  </details>`;
+
+  $("#guardar-horarios", cont).addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    const cambios = [...cont.querySelectorAll("tr[data-dia]")].map((tr) => {
+      const val = (n) => $(`[name=${n}]`, tr);
+      return sb.from("horarios").update({
+        laboral: val("laboral").checked,
+        hora_entrada: val("hora_entrada").value || null,
+        hora_salida: val("hora_salida").value || null,
+        breaks_por_dia: Number(val("breaks_por_dia").value) || 0,
+        minutos_break: Number(val("minutos_break").value) || 0,
+        minutos_almuerzo: Number(val("minutos_almuerzo").value) || 0
+      }).eq("dia_semana", Number(tr.dataset.dia));
+    });
+    cambios.push(sb.from("ajustes").update({
+      minutos_tolerancia: Number($("#aj-tol", cont).value) || 0,
+      max_tardanzas_semana: Number($("#aj-max", cont).value) || 0
+    }).eq("id", 1));
+    const resultados = await Promise.all(cambios);
+    e.target.disabled = false;
+    const fallo = resultados.find((x) => x.error);
+    if (fallo) return toast(traducirError(fallo.error), "error");
+    toast("Horarios guardados");
+    navegar();
+  });
 }
 
 // ---------- Arranque ----------

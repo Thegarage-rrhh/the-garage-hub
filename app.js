@@ -1,6 +1,6 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 3
-//  Login · Roles · Empleados · Cuentas · Asistencia · Tareas
+//  THE GARAGE HUB · Fase 4
+//  Login · Empleados · Cuentas · Asistencia · Tareas · Inventarios
 // =====================================================
 
 const root = document.getElementById("root");
@@ -60,7 +60,9 @@ function abrirModal({ titulo, cuerpo, botonTexto = "Guardar", alGuardar, sinPie 
     ${sinPie ? "" : `<footer><button class="btn btn-texto" data-cerrar type="button">Cancelar</button>
       <button class="btn btn-rojo" data-guardar type="button">${esc(botonTexto)}</button></footer>`}
   </div>`;
-  const cerrar = () => fondo.remove();
+  const cerrar = () => { fondo.remove(); document.removeEventListener("keydown", alTeclado); };
+  const alTeclado = (e) => { if (e.key === "Escape") cerrar(); };
+  document.addEventListener("keydown", alTeclado);
   fondo.addEventListener("click", (e) => { if (e.target === fondo || e.target.closest("[data-cerrar]")) cerrar(); });
   const form = $("form", fondo);
   form.addEventListener("submit", (e) => e.preventDefault());
@@ -90,7 +92,7 @@ const MENU = {
       { id: "jornada", label: "Mi jornada", listo: true },
       { id: "tareas", label: "Tareas", listo: true } ] },
     { grupo: "Operación", items: [
-      { id: "inventarios", label: "Inventarios", fase: 4 },
+      { id: "inventarios", label: "Inventarios", listo: true },
       { id: "agenda", label: "Agenda de entregas", fase: 7 } ] },
     { grupo: "Comercial", items: [
       { id: "clientes", label: "Clientes", fase: 5 },
@@ -107,13 +109,14 @@ const MENU = {
       { id: "jornada", label: "Mi jornada", listo: true },
       { id: "mis-tareas", label: "Mis tareas", listo: true } ] },
     { grupo: "Consultas", items: [
-      { id: "inventario", label: "Inventario", fase: 4 },
-      { id: "moldes", label: "Moldes", fase: 4 },
+      { id: "inventario", label: "Inventario", listo: true },
+      { id: "moldes", label: "Moldes", listo: true },
       { id: "precios", label: "Precios", fase: 5 } ] }
   ]
 };
 
-const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas };
+const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
+  inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -1136,6 +1139,465 @@ function modalTiempos(t, nombreEmpleado, tramos) {
         }).join("")}</tbody></table></div>`
         : `<p class="vacio">Esta tarea todavía no tiene tiempos registrados.</p>`}
       <p class="ayuda">Los tramos se cortan solos cuando el empleado sale a break, a almuerzo o marca salida, para que el tiempo real no se infle.</p>`
+  });
+}
+
+// =====================================================
+//  FASE 4 · INVENTARIOS
+// =====================================================
+let opcionesCache = null;
+let tabInventario = "productos";
+let nombresUsuarios = {};
+
+async function cargarOpciones(forzar = false) {
+  if (!opcionesCache || forzar) {
+    const { data } = await sb.from("opciones").select("*").order("categoria").order("orden").order("valor");
+    opcionesCache = data || [];
+  }
+  return opcionesCache;
+}
+const ops = (cat) => (opcionesCache || []).filter((o) => o.categoria === cat && o.activo).map((o) => o.valor);
+const selectOps = (name, cat, valor = "", obligatorio = false) =>
+  `<select name="${name}" ${obligatorio ? "required" : ""}><option value="">—</option>${ops(cat).map((v) => `<option ${v === valor ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+const chipCantidad = (item) => {
+  const bajo = Number(item.stock_minimo) > 0 && Number(item.cantidad) <= Number(item.stock_minimo);
+  return `<b class="${bajo ? "texto-alerta" : ""}">${Number(item.cantidad)}</b>${bajo ? ` <span class="chip chip-alerta">Stock bajo</span>` : ""}`;
+};
+const pesos = (n) => Number(n || 0).toLocaleString("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
+
+async function cargarNombres() {
+  if (Object.keys(nombresUsuarios).length) return;
+  const { data } = await sb.from("perfiles").select("id,nombre,email");
+  (data || []).forEach((p) => { nombresUsuarios[p.id] = p.nombre || p.email; });
+}
+
+// Barra de búsqueda reutilizable
+function barraBusqueda(id, placeholder, filtros = "", boton = "") {
+  return `<div class="barra-inv">
+    <input type="search" id="${id}" placeholder="${placeholder}" autocomplete="off">
+    ${filtros}${boton}</div>`;
+}
+const coincide = (texto, q) => !q || texto.toLowerCase().includes(q.toLowerCase());
+
+// ---------- Vista admin: Inventarios (con pestañas) ----------
+async function vistaInventarios(el) {
+  await cargarOpciones();
+  const pestanas = [
+    ["productos", "Productos"], ["moldes", "Moldes"],
+    ["materias", "Materias primas"], ["listas", "Listas"]
+  ];
+  el.innerHTML = encabezado("Inventarios", "Productos terminados, moldes y materias primas.") +
+    `<div class="pestanas">${pestanas.map(([id, t]) => `<button class="pestana ${tabInventario === id ? "activa" : ""}" data-tab="${id}">${t}</button>`).join("")}</div>
+     <div id="panel-inv"></div>`;
+  $(".pestanas", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    tabInventario = b.dataset.tab;
+    vistaInventarios(el);
+  });
+  const cont = $("#panel-inv", el);
+  if (tabInventario === "productos") panelProductos(cont, true);
+  if (tabInventario === "moldes") panelMoldes(cont, true);
+  if (tabInventario === "materias") panelMaterias(cont);
+  if (tabInventario === "listas") panelListas(cont);
+}
+
+// ---------- Vistas empleado ----------
+async function vistaInventarioEmpleado(el) {
+  await cargarOpciones();
+  el.innerHTML = encabezado("Inventario", "Consulta los productos terminados disponibles.");
+  const cont = document.createElement("div");
+  el.appendChild(cont);
+  panelProductos(cont, false);
+}
+async function vistaMoldesEmpleado(el) {
+  await cargarOpciones();
+  el.innerHTML = encabezado("Moldes", "Consulta los moldes de tapetes, bodegas y tapicería.");
+  const cont = document.createElement("div");
+  el.appendChild(cont);
+  panelMoldes(cont, false);
+}
+
+// ---------- Panel: Productos terminados ----------
+async function panelProductos(cont, esAdmin) {
+  await cargarOpciones();
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const { data, error } = await sb.from("productos").select("*").order("marca").order("referencia");
+  if (error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(error))}</p></div>`; return; }
+
+  cont.innerHTML = `<div class="panel">
+    ${barraBusqueda("q-prod", "Buscar por marca, referencia, año o material…",
+      `<select id="f-cat"><option value="">Todas las categorías</option>${ops("producto_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>
+       <select id="f-est"><option value="">Todos los estados</option>${ops("producto_estado").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`,
+      esAdmin ? `<button class="btn btn-rojo" id="nuevo-prod">+ Agregar producto</button>` : "")}
+    <div class="tabla-wrap" id="t-prod"></div>
+  </div>`;
+
+  const pintar = () => {
+    const q = $("#q-prod", cont).value, cat = $("#f-cat", cont).value, est = $("#f-est", cont).value;
+    const lista = data.filter((p) =>
+      coincide([p.marca, p.referencia, p.anio, p.material, p.ubicacion, p.nombre].filter(Boolean).join(" "), q) &&
+      (!cat || p.categoria === cat) && (!est || p.estado === est));
+    $("#t-prod", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay productos que coincidan.</p>`
+      : `<table><thead><tr><th>Producto</th><th>Categoría</th><th>Estado</th><th>Cantidad</th><th>Ubicación</th>${esAdmin ? "<th>Costo</th>" : ""}<th>Precio</th><th></th></tr></thead><tbody>
+        ${lista.map((p) => `<tr>
+          <td><b>${esc([p.marca, p.referencia].filter(Boolean).join(" ") || p.nombre || "Sin nombre")}</b>
+            <span class="sub">${esc([p.anio, p.material].filter(Boolean).join(" · ") || "")}</span></td>
+          <td>${esc(p.categoria || "—")}</td>
+          <td><span class="chip ${p.estado === "Defecto" ? "chip-aviso" : "chip-ok"}">${esc(p.estado || "Full")}</span></td>
+          <td>${chipCantidad(p)}</td>
+          <td>${esc(p.ubicacion || "—")}</td>
+          ${esAdmin ? `<td>${pesos(p.costo)}</td>` : ""}
+          <td>${pesos(p.precio_venta)}</td>
+          <td><div class="acciones">
+            ${esAdmin ? `<button class="btn btn-chico btn-rojo" data-acc="ajustar|${p.id}">Ajustar</button>
+            <button class="btn btn-chico" data-acc="editar|${p.id}">Editar</button>` : ""}
+            <button class="btn btn-chico" data-acc="historial|${p.id}">Historial</button>
+            ${esAdmin ? `<button class="btn btn-chico btn-texto" data-acc="borrar|${p.id}">Eliminar</button>` : ""}
+          </div></td></tr>`).join("")}
+      </tbody></table><p class="ayuda" style="margin-top:1rem">${lista.length} producto(s) · ${lista.reduce((s, p) => s + Number(p.cantidad), 0)} unidades en total</p>`;
+  };
+  pintar();
+
+  const recargar = () => panelProductos(cont, esAdmin);
+  $("#q-prod", cont).addEventListener("input", pintar);
+  $("#f-cat", cont).addEventListener("change", pintar);
+  $("#f-est", cont).addEventListener("change", pintar);
+  if (esAdmin) $("#nuevo-prod", cont).addEventListener("click", () => formProducto(null, esAdmin, recargar));
+  $("#t-prod", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const p = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formProducto(p, esAdmin, recargar);
+    if (accion === "ajustar") modalAjustar("producto", p, [p.marca, p.referencia].filter(Boolean).join(" ") || p.nombre, "unidades", recargar);
+    if (accion === "historial") modalHistorial("producto", p.id);
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar "${p.marca || ""} ${p.referencia || p.nombre}" del inventario?`)) return;
+      const { error } = await sb.from("productos").delete().eq("id", p.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Producto eliminado"); recargar();
+    }
+  });
+}
+
+function formProducto(p, esAdmin, alGuardar) {
+  const nuevo = !p;
+  const v = (c) => esc(p?.[c] ?? "");
+  abrirModal({
+    titulo: nuevo ? "Agregar producto" : "Editar producto",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Marca *</label><input name="marca" required placeholder="Mazda" value="${v("marca")}"></div>
+        <div class="campo"><label>Referencia *</label><input name="referencia" required placeholder="Mazda 3" value="${v("referencia")}"></div>
+        <div class="campo"><label>Año</label><input name="anio" placeholder="2018-2022" value="${v("anio")}"></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "producto_categoria", p?.categoria ?? "Tapetes")}</div>
+        <div class="campo"><label>Material</label>${selectOps("material", "producto_material", p?.material)}</div>
+        <div class="campo"><label>Estado</label>${selectOps("estado", "producto_estado", p?.estado ?? "Full")}</div>
+        ${nuevo ? `<div class="campo"><label>Cantidad inicial</label><input type="number" step="1" min="0" name="cantidad" value="1"></div>` : ""}
+        <div class="campo"><label>Stock mínimo</label><input type="number" step="1" min="0" name="stock_minimo" value="${p?.stock_minimo ?? 0}"></div>
+        <div class="campo"><label>Ubicación</label><input name="ubicacion" placeholder="Estante 3" value="${v("ubicacion")}"></div>
+        ${esAdmin ? `<div class="campo"><label>Costo</label><input type="number" step="1" min="0" name="costo" value="${p?.costo ?? 0}"></div>` : ""}
+        <div class="campo"><label>Precio de venta</label><input type="number" step="1" min="0" name="precio_venta" value="${p?.precio_venta ?? 0}"></div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" value="${v("notas")}"></div>`,
+    alGuardar: async (d) => {
+      const datos = {
+        marca: d.marca.trim(), referencia: d.referencia.trim(), anio: d.anio.trim() || null,
+        nombre: `${d.marca.trim()} ${d.referencia.trim()}`.trim(),
+        categoria: d.categoria || "Otros", material: d.material || null, estado: d.estado || "Full",
+        stock_minimo: Number(d.stock_minimo) || 0, ubicacion: d.ubicacion.trim() || null,
+        precio_venta: Number(d.precio_venta) || 0, notas: d.notas.trim() || null
+      };
+      if (esAdmin) datos.costo = Number(d.costo) || 0;
+      if (nuevo) datos.cantidad = Number(d.cantidad) || 0;
+      const { error } = nuevo ? await sb.from("productos").insert(datos) : await sb.from("productos").update(datos).eq("id", p.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Producto agregado" : "Producto actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Panel: Moldes ----------
+async function panelMoldes(cont, esAdmin) {
+  await cargarOpciones();
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const { data, error } = await sb.from("moldes").select("*").order("marca").order("referencia");
+  if (error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(error))}</p></div>`; return; }
+
+  cont.innerHTML = `<div class="panel">
+    ${barraBusqueda("q-mol", "Buscar por marca, referencia o modelo…",
+      `<select id="f-tipo"><option value="">Todos los tipos</option>${ops("molde_tipo").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`,
+      esAdmin ? `<button class="btn btn-rojo" id="nuevo-mol">+ Agregar molde</button>` : "")}
+    <div class="tabla-wrap" id="t-mol"></div>
+  </div>`;
+
+  const pintar = () => {
+    const q = $("#q-mol", cont).value, tipo = $("#f-tipo", cont).value;
+    const lista = data.filter((m) =>
+      coincide([m.marca, m.referencia, m.modelo, m.anio, m.version, m.ubicacion].filter(Boolean).join(" "), q) &&
+      (!tipo || m.tipo === tipo));
+    $("#t-mol", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay moldes que coincidan.</p>`
+      : `<table><thead><tr><th>Molde</th><th>Tipo</th><th>Piezas</th><th>Cantidad</th><th>Ubicación</th><th></th></tr></thead><tbody>
+        ${lista.map((m) => `<tr>
+          <td><b>${esc([m.marca, m.referencia].filter(Boolean).join(" ") || "Sin nombre")}</b>
+            <span class="sub">${esc([m.modelo, m.anio, m.version].filter(Boolean).join(" · "))}</span></td>
+          <td>${esc(m.tipo || "—")}</td>
+          <td><div class="chips">${(m.piezas || []).map((x) => `<span class="chip">${esc(x)}</span>`).join("") || "—"}</div></td>
+          <td>${chipCantidad(m)}</td>
+          <td>${esc(m.ubicacion || "—")}</td>
+          <td><div class="acciones">
+            ${esAdmin ? `<button class="btn btn-chico btn-rojo" data-acc="ajustar|${m.id}">Ajustar</button>
+            <button class="btn btn-chico" data-acc="editar|${m.id}">Editar</button>` : ""}
+            <button class="btn btn-chico" data-acc="historial|${m.id}">Historial</button>
+            ${esAdmin ? `<button class="btn btn-chico btn-texto" data-acc="borrar|${m.id}">Eliminar</button>` : ""}
+          </div></td></tr>`).join("")}
+      </tbody></table><p class="ayuda" style="margin-top:1rem">${lista.length} molde(s)</p>`;
+  };
+  pintar();
+
+  const recargar = () => panelMoldes(cont, esAdmin);
+  $("#q-mol", cont).addEventListener("input", pintar);
+  $("#f-tipo", cont).addEventListener("change", pintar);
+  if (esAdmin) $("#nuevo-mol", cont).addEventListener("click", () => formMolde(null, recargar));
+  $("#t-mol", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const m = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formMolde(m, recargar);
+    if (accion === "ajustar") modalAjustar("molde", m, [m.marca, m.referencia].filter(Boolean).join(" "), "moldes", recargar);
+    if (accion === "historial") modalHistorial("molde", m.id);
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar el molde "${m.marca || ""} ${m.referencia || ""}"?`)) return;
+      const { error } = await sb.from("moldes").delete().eq("id", m.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Molde eliminado"); recargar();
+    }
+  });
+}
+
+function formMolde(m, alGuardar) {
+  const nuevo = !m;
+  const v = (c) => esc(m?.[c] ?? "");
+  abrirModal({
+    titulo: nuevo ? "Agregar molde" : "Editar molde",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Tipo *</label>${selectOps("tipo", "molde_tipo", m?.tipo ?? "Tapete completo", true)}</div>
+        <div class="campo"><label>Marca *</label><input name="marca" required placeholder="Mazda" value="${v("marca")}"></div>
+        <div class="campo"><label>Referencia *</label><input name="referencia" required placeholder="Mazda 3" value="${v("referencia")}"></div>
+        <div class="campo"><label>Modelo</label><input name="modelo" placeholder="Sedán" value="${v("modelo")}"></div>
+        <div class="campo"><label>Año</label><input name="anio" placeholder="2018-2022" value="${v("anio")}"></div>
+        ${nuevo ? `<div class="campo"><label>Cantidad</label><input type="number" step="1" min="0" name="cantidad" value="1"></div>` : ""}
+        <div class="campo"><label>Ubicación</label><input name="ubicacion" placeholder="Caja 12" value="${v("ubicacion")}"></div>
+      </div>
+      <div class="campo"><label>Piezas que incluye</label>
+        <div class="chips-check">${ops("molde_pieza").map((x) => `<label class="check"><input type="checkbox" name="pieza" value="${esc(x)}" ${(m?.piezas || []).includes(x) ? "checked" : ""}> ${esc(x)}</label>`).join("")}</div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" value="${v("notas")}"></div>`,
+    alGuardar: async (d, form) => {
+      const piezas = [...form.querySelectorAll("[name=pieza]:checked")].map((x) => x.value);
+      const datos = {
+        tipo: d.tipo, marca: d.marca.trim(), referencia: d.referencia.trim(),
+        modelo: d.modelo.trim() || null, anio: d.anio.trim() || null,
+        ubicacion: d.ubicacion.trim() || null, notas: d.notas.trim() || null, piezas
+      };
+      if (nuevo) datos.cantidad = Number(d.cantidad) || 0;
+      const { error } = nuevo ? await sb.from("moldes").insert(datos) : await sb.from("moldes").update(datos).eq("id", m.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Molde agregado" : "Molde actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Panel: Materias primas ----------
+async function panelMaterias(cont) {
+  await cargarOpciones();
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const [mat, prov] = await Promise.all([
+    sb.from("materias_primas").select("*").order("categoria").order("nombre"),
+    sb.from("proveedores").select("id,nombre").order("nombre")
+  ]);
+  if (mat.error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(mat.error))}</p></div>`; return; }
+  const data = mat.data, proveedores = prov.data || [];
+
+  cont.innerHTML = `<div class="panel">
+    ${barraBusqueda("q-mp", "Buscar materia prima…",
+      `<select id="f-mp"><option value="">Todas las categorías</option>${ops("mp_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`,
+      `<button class="btn btn-rojo" id="nueva-mp">+ Agregar materia prima</button>`)}
+    <div class="tabla-wrap" id="t-mp"></div>
+  </div>`;
+
+  const pintar = () => {
+    const q = $("#q-mp", cont).value, cat = $("#f-mp", cont).value;
+    const lista = data.filter((m) => coincide([m.nombre, m.categoria, m.notas].filter(Boolean).join(" "), q) && (!cat || m.categoria === cat));
+    $("#t-mp", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay materias primas que coincidan.</p>`
+      : `<table><thead><tr><th>Material</th><th>Categoría</th><th>Cantidad</th><th>Unidad</th><th>Costo unitario</th><th>Proveedor</th><th></th></tr></thead><tbody>
+        ${lista.map((m) => `<tr>
+          <td><b>${esc(m.nombre)}</b>${m.notas ? `<span class="sub">${esc(m.notas)}</span>` : ""}</td>
+          <td>${esc(m.categoria || "—")}</td>
+          <td>${chipCantidad(m)}</td>
+          <td>${esc(m.unidad || "—")}</td>
+          <td>${pesos(m.costo_unitario)}</td>
+          <td>${esc(proveedores.find((p) => p.id === m.proveedor_id)?.nombre || "—")}</td>
+          <td><div class="acciones">
+            <button class="btn btn-chico btn-rojo" data-acc="ajustar|${m.id}">Ajustar</button>
+            <button class="btn btn-chico" data-acc="editar|${m.id}">Editar</button>
+            <button class="btn btn-chico" data-acc="historial|${m.id}">Historial</button>
+            <button class="btn btn-chico btn-texto" data-acc="borrar|${m.id}">Eliminar</button>
+          </div></td></tr>`).join("")}
+      </tbody></table>`;
+  };
+  pintar();
+
+  const recargar = () => panelMaterias(cont);
+  $("#q-mp", cont).addEventListener("input", pintar);
+  $("#f-mp", cont).addEventListener("change", pintar);
+  $("#nueva-mp", cont).addEventListener("click", () => formMateria(null, proveedores, recargar));
+  $("#t-mp", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const m = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formMateria(m, proveedores, recargar);
+    if (accion === "ajustar") modalAjustar("materia_prima", m, m.nombre, m.unidad || "unidades", recargar);
+    if (accion === "historial") modalHistorial("materia_prima", m.id);
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar "${m.nombre}" del inventario?`)) return;
+      const { error } = await sb.from("materias_primas").delete().eq("id", m.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Materia prima eliminada"); recargar();
+    }
+  });
+}
+
+function formMateria(m, proveedores, alGuardar) {
+  const nuevo = !m;
+  abrirModal({
+    titulo: nuevo ? "Agregar materia prima" : "Editar materia prima",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Nombre *</label><input name="nombre" required placeholder="Alfombra negra" value="${esc(m?.nombre ?? "")}"></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "mp_categoria", m?.categoria)}</div>
+        <div class="campo"><label>Unidad</label>${selectOps("unidad", "mp_unidad", m?.unidad ?? "Metro")}</div>
+        ${nuevo ? `<div class="campo"><label>Cantidad inicial</label><input type="number" step="0.01" min="0" name="cantidad" value="0"></div>` : ""}
+        <div class="campo"><label>Stock mínimo</label><input type="number" step="0.01" min="0" name="stock_minimo" value="${m?.stock_minimo ?? 0}"></div>
+        <div class="campo"><label>Costo por unidad</label><input type="number" step="1" min="0" name="costo_unitario" value="${m?.costo_unitario ?? 0}"></div>
+        <div class="campo"><label>Proveedor</label><select name="proveedor_id"><option value="">—</option>
+          ${proveedores.map((p) => `<option value="${p.id}" ${m?.proveedor_id === p.id ? "selected" : ""}>${esc(p.nombre)}</option>`).join("")}</select></div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" placeholder="Ej: 1 galón = 3.8 litros" value="${esc(m?.notas ?? "")}"></div>`,
+    alGuardar: async (d) => {
+      const datos = {
+        nombre: d.nombre.trim(), categoria: d.categoria || null, unidad: d.unidad || "Unidad",
+        stock_minimo: Number(d.stock_minimo) || 0, costo_unitario: Number(d.costo_unitario) || 0,
+        proveedor_id: d.proveedor_id ? Number(d.proveedor_id) : null, notas: d.notas.trim() || null
+      };
+      if (nuevo) datos.cantidad = Number(d.cantidad) || 0;
+      const { error } = nuevo ? await sb.from("materias_primas").insert(datos) : await sb.from("materias_primas").update(datos).eq("id", m.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Materia prima agregada" : "Materia prima actualizada");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Ajustar cantidad (entrada / salida) ----------
+function modalAjustar(tipoItem, item, nombre, unidad, alGuardar) {
+  abrirModal({
+    titulo: `Ajustar cantidad · ${nombre}`,
+    botonTexto: "Registrar movimiento",
+    cuerpo: `<p class="ayuda">Cantidad actual: <b>${Number(item.cantidad)}</b> ${esc(unidad)}</p>
+      <div class="rejilla">
+        <div class="campo"><label>Movimiento</label><select name="signo">
+          <option value="1">Entrada (sumar)</option><option value="-1">Salida (restar)</option></select></div>
+        <div class="campo"><label>Cantidad *</label><input type="number" step="0.01" min="0.01" name="cantidad" required></div>
+      </div>
+      <div class="campo"><label>Motivo</label><input name="motivo" placeholder="Producción, venta, daño, compra…"></div>`,
+    alGuardar: async (d) => {
+      const cantidad = Number(d.signo) * Number(d.cantidad);
+      const { error } = await sb.from("movimientos").insert({
+        tipo_item: tipoItem, item_id: item.id, cantidad, motivo: d.motivo.trim() || null
+      });
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(`${cantidad > 0 ? "Entrada" : "Salida"} registrada`);
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Historial de movimientos ----------
+async function modalHistorial(tipoItem, itemId) {
+  await cargarNombres();
+  const { fondo } = abrirModal({ titulo: "Historial de movimientos", sinPie: true, cuerpo: `<div id="hist"><p class="vacio">Cargando…</p></div>` });
+  const { data, error } = await sb.from("movimientos").select("*").eq("tipo_item", tipoItem).eq("item_id", itemId)
+    .order("created_at", { ascending: false }).limit(50);
+  const cont = $("#hist", fondo);
+  if (error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+  cont.innerHTML = !data.length
+    ? `<p class="vacio">Todavía no hay movimientos registrados.</p>`
+    : `<div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Motivo</th><th>Quién</th></tr></thead><tbody>
+      ${data.map((m) => `<tr>
+        <td>${fechaCorta(new Date(m.created_at).toLocaleDateString("en-CA", { timeZone: TZ }))}<span class="sub">${horaCorta(m.created_at)}</span></td>
+        <td><span class="chip ${m.cantidad > 0 ? "chip-ok" : "chip-alerta"}">${m.cantidad > 0 ? "+" : ""}${Number(m.cantidad)}</span></td>
+        <td>${esc(m.motivo || "—")}</td>
+        <td>${esc(nombresUsuarios[m.usuario_id] || "—")}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+// ---------- Panel: Listas configurables ----------
+async function panelListas(cont) {
+  await cargarOpciones(true);
+  const grupos = [
+    ["producto_categoria", "Categorías de productos"], ["producto_material", "Materiales de productos"],
+    ["producto_estado", "Estados de productos"], ["molde_tipo", "Tipos de molde"],
+    ["molde_pieza", "Piezas de molde"], ["mp_categoria", "Categorías de materia prima"],
+    ["mp_unidad", "Unidades de medida"]
+  ];
+  cont.innerHTML = `<div class="panel" id="wrap-listas">
+    <h2>Listas configurables</h2>
+    <p class="ayuda">Agrega o quita opciones según lo que vayan necesitando. Si quitas una opción, los registros que ya la usan la conservan.</p>
+    ${grupos.map(([cat, titulo]) => `<div class="lista-grupo">
+      <h3 class="subtitulo">${titulo}</h3>
+      <div class="chips" id="g-${cat}">
+        ${opcionesCache.filter((o) => o.categoria === cat).map((o) => `
+          <span class="chip ${o.activo ? "" : "chip-apagado"}">${esc(o.valor)}
+            <button class="chip-x" data-quitar="${o.id}" title="Quitar">✕</button></span>`).join("") || `<span class="sub">Sin opciones</span>`}
+      </div>
+      <div class="fila-form" style="margin-top:.5rem">
+        <div class="campo"><input placeholder="Nueva opción" data-nueva="${cat}"></div>
+        <button class="btn btn-chico" data-agregar="${cat}">Agregar</button>
+      </div>
+    </div>`).join("")}
+  </div>`;
+
+  $("#wrap-listas", cont).addEventListener("click", async (e) => {
+    const agregar = e.target.closest("[data-agregar]");
+    const quitar = e.target.closest("[data-quitar]");
+    if (agregar) {
+      const cat = agregar.dataset.agregar;
+      const input = cont.querySelector(`[data-nueva="${cat}"]`);
+      const valor = input.value.trim();
+      if (!valor) return;
+      const { error } = await sb.from("opciones").insert({ categoria: cat, valor, orden: 50 });
+      if (error) return toast(traducirError(error), "error");
+      toast("Opción agregada");
+      panelListas(cont);
+    }
+    if (quitar) {
+      if (!confirm("¿Quitar esta opción de la lista?")) return;
+      const { error } = await sb.from("opciones").delete().eq("id", quitar.dataset.quitar);
+      if (error) return toast(traducirError(error), "error");
+      toast("Opción quitada");
+      panelListas(cont);
+    }
   });
 }
 

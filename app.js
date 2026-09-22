@@ -1,6 +1,6 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 4
-//  Login · Empleados · Cuentas · Asistencia · Tareas · Inventarios
+//  THE GARAGE HUB · Fase 5
+//  Empleados · Asistencia · Tareas · Inventarios · Clientes · Precios
 // =====================================================
 
 const root = document.getElementById("root");
@@ -95,9 +95,9 @@ const MENU = {
       { id: "inventarios", label: "Inventarios", listo: true },
       { id: "agenda", label: "Agenda de entregas", fase: 7 } ] },
     { grupo: "Comercial", items: [
-      { id: "clientes", label: "Clientes", fase: 5 },
-      { id: "proveedores", label: "Proveedores", fase: 5 },
-      { id: "precios", label: "Precios", fase: 5 } ] },
+      { id: "clientes", label: "Clientes", listo: true },
+      { id: "proveedores", label: "Proveedores", listo: true },
+      { id: "precios", label: "Precios", listo: true } ] },
     { grupo: "Dinero", items: [
       { id: "facturacion", label: "Facturación", fase: 6 },
       { id: "contabilidad", label: "Contabilidad", fase: 8 },
@@ -111,12 +111,13 @@ const MENU = {
     { grupo: "Consultas", items: [
       { id: "inventario", label: "Inventario", listo: true },
       { id: "moldes", label: "Moldes", listo: true },
-      { id: "precios", label: "Precios", fase: 5 } ] }
+      { id: "precios", label: "Precios", listo: true } ] }
   ]
 };
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
-  inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado };
+  inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -1597,6 +1598,386 @@ async function panelListas(cont) {
       if (error) return toast(traducirError(error), "error");
       toast("Opción quitada");
       panelListas(cont);
+    }
+  });
+}
+
+// =====================================================
+//  FASE 5 · CLIENTES, PROVEEDORES Y PRECIOS
+// =====================================================
+
+// ---------- Clientes ----------
+async function vistaClientes(el) {
+  await cargarOpciones();
+  el.innerHTML = encabezado("Clientes", "Base de datos de clientes y sus vehículos.",
+    `<button class="btn btn-rojo" id="nuevo-cli">+ Agregar cliente</button>`) +
+    `<div class="panel">
+      ${barraBusqueda("q-cli", "Buscar por nombre, documento, teléfono o placa…",
+        `<select id="f-canal"><option value="">Todos los canales</option>${ops("canal_origen").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`)}
+      <div class="tabla-wrap" id="t-cli"><p class="vacio">Cargando…</p></div>
+    </div>`;
+
+  const [cli, veh] = await Promise.all([
+    sb.from("clientes").select("*").order("nombre"),
+    sb.from("vehiculos").select("*")
+  ]);
+  if (cli.error) { $("#t-cli", el).innerHTML = `<p class="vacio">${esc(traducirError(cli.error))}</p>`; return; }
+  const data = cli.data, vehiculos = veh.data || [];
+  const recargar = () => vistaClientes(el);
+  const autosDe = (id) => vehiculos.filter((v) => v.cliente_id === id);
+
+  const pintar = () => {
+    const q = $("#q-cli", el).value, canal = $("#f-canal", el).value;
+    const lista = data.filter((c) => {
+      const placas = autosDe(c.id).map((v) => [v.placa, v.marca, v.referencia].filter(Boolean).join(" ")).join(" ");
+      return coincide([c.nombre, c.documento, c.telefono, c.email, c.ciudad, placas].filter(Boolean).join(" "), q) &&
+        (!canal || c.canal_origen === canal);
+    });
+    $("#t-cli", el).innerHTML = !lista.length
+      ? `<p class="vacio">No hay clientes que coincidan.</p>`
+      : `<table><thead><tr><th>Cliente</th><th>Documento</th><th>Contacto</th><th>Vehículos</th><th>Canal</th><th></th></tr></thead><tbody>
+        ${lista.map((c) => `<tr>
+          <td><b>${esc(c.nombre)}</b>${c.ciudad ? `<span class="sub">${esc(c.ciudad)}</span>` : ""}</td>
+          <td>${esc([c.tipo_documento, c.documento].filter(Boolean).join(" ") || "—")}</td>
+          <td>${esc(c.telefono || "—")}${c.email ? `<span class="sub">${esc(c.email)}</span>` : ""}</td>
+          <td><div class="chips">${autosDe(c.id).map((v) => `<span class="chip">${esc([v.marca, v.referencia].filter(Boolean).join(" "))}${v.placa ? ` · ${esc(v.placa)}` : ""}</span>`).join("") || "—"}</div></td>
+          <td>${esc(c.canal_origen || "—")}</td>
+          <td><div class="acciones">
+            <button class="btn btn-chico btn-rojo" data-acc="autos|${c.id}">Vehículos</button>
+            <button class="btn btn-chico" data-acc="editar|${c.id}">Editar</button>
+            <button class="btn btn-chico btn-texto" data-acc="borrar|${c.id}">Eliminar</button>
+          </div></td></tr>`).join("")}
+      </tbody></table><p class="ayuda" style="margin-top:1rem">${lista.length} cliente(s)</p>`;
+  };
+  pintar();
+
+  $("#q-cli", el).addEventListener("input", pintar);
+  $("#f-canal", el).addEventListener("change", pintar);
+  $("#nuevo-cli", el).addEventListener("click", () => formCliente(null, recargar));
+  $("#t-cli", el).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const c = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formCliente(c, recargar);
+    if (accion === "autos") modalVehiculos(c, recargar);
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar a "${c.nombre}"? También se borran sus vehículos registrados.`)) return;
+      const { error } = await sb.from("clientes").delete().eq("id", c.id);
+      if (error) return toast(error.code === "23503" ? "Este cliente tiene facturas y no se puede eliminar." : traducirError(error), "error");
+      toast("Cliente eliminado"); recargar();
+    }
+  });
+}
+
+function formCliente(c, alGuardar) {
+  const nuevo = !c;
+  const v = (campo) => esc(c?.[campo] ?? "");
+  abrirModal({
+    titulo: nuevo ? "Agregar cliente" : "Editar cliente",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Nombre o empresa *</label><input name="nombre" required value="${v("nombre")}"></div>
+        <div class="campo"><label>Tipo de documento</label>${selectOps("tipo_documento", "tipo_documento", c?.tipo_documento)}</div>
+        <div class="campo"><label>Número de documento</label><input name="documento" value="${v("documento")}"></div>
+        <div class="campo"><label>Teléfono</label><input name="telefono" type="tel" value="${v("telefono")}"></div>
+        <div class="campo"><label>Correo</label><input name="email" type="email" value="${v("email")}"></div>
+        <div class="campo"><label>Ciudad</label><input name="ciudad" value="${v("ciudad")}"></div>
+        <div class="campo"><label>Dirección</label><input name="direccion" value="${v("direccion")}"></div>
+        <div class="campo"><label>¿Cómo nos conoció?</label>${selectOps("canal_origen", "canal_origen", c?.canal_origen)}</div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" placeholder="Preferencias, acuerdos, observaciones…" value="${v("notas")}"></div>
+      ${nuevo ? `<p class="ayuda">Después de crearlo puedes agregarle sus vehículos con el botón "Vehículos".</p>` : ""}`,
+    alGuardar: async (d) => {
+      const datos = {
+        nombre: d.nombre.trim(), tipo_documento: d.tipo_documento || null, documento: d.documento.trim() || null,
+        telefono: d.telefono.trim() || null, email: d.email.trim() || null, ciudad: d.ciudad.trim() || null,
+        direccion: d.direccion.trim() || null, canal_origen: d.canal_origen || null, notas: d.notas.trim() || null
+      };
+      const { error } = nuevo ? await sb.from("clientes").insert(datos) : await sb.from("clientes").update(datos).eq("id", c.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Cliente agregado" : "Cliente actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+async function modalVehiculos(c, alCambiar) {
+  const { fondo } = abrirModal({
+    titulo: `Vehículos de ${c.nombre}`,
+    sinPie: true,
+    cuerpo: `<div class="tabla-wrap" id="lista-autos"><p class="vacio">Cargando…</p></div>
+      <h4 class="subtitulo">Agregar vehículo</h4>
+      <div class="rejilla">
+        <div class="campo"><label>Tipo</label>${selectOps("tipo", "tipo_vehiculo", "Automóvil")}</div>
+        <div class="campo"><label>Marca</label><input name="marca" placeholder="Mazda"></div>
+        <div class="campo"><label>Referencia</label><input name="referencia" placeholder="Mazda 3"></div>
+        <div class="campo"><label>Año</label><input name="anio" placeholder="2019"></div>
+        <div class="campo"><label>Placa</label><input name="placa" placeholder="ABC123"></div>
+        <div class="campo"><label>Color</label><input name="color"></div>
+      </div>
+      <div><button class="btn btn-rojo" type="button" id="agregar-auto">Agregar vehículo</button></div>`
+  });
+
+  const pintar = async () => {
+    const { data, error } = await sb.from("vehiculos").select("*").eq("cliente_id", c.id).order("id");
+    const cont = $("#lista-autos", fondo);
+    if (error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+    cont.innerHTML = !data.length
+      ? `<p class="vacio">Este cliente no tiene vehículos registrados.</p>`
+      : `<table><thead><tr><th>Vehículo</th><th>Tipo</th><th>Placa</th><th></th></tr></thead><tbody>
+        ${data.map((v) => `<tr>
+          <td><b>${esc([v.marca, v.referencia].filter(Boolean).join(" ") || "Sin nombre")}</b>
+            <span class="sub">${esc([v.anio, v.color].filter(Boolean).join(" · "))}</span></td>
+          <td>${esc(v.tipo || "—")}</td><td>${esc(v.placa || "—")}</td>
+          <td><button class="btn btn-chico btn-texto" data-borrar="${v.id}">Eliminar</button></td></tr>`).join("")}
+      </tbody></table>`;
+    cont.onclick = async (e) => {
+      const b = e.target.closest("[data-borrar]");
+      if (!b || !confirm("¿Eliminar este vehículo?")) return;
+      const { error } = await sb.from("vehiculos").delete().eq("id", b.dataset.borrar);
+      if (error) return toast(traducirError(error), "error");
+      toast("Vehículo eliminado"); pintar(); alCambiar();
+    };
+  };
+
+  $("#agregar-auto", fondo).addEventListener("click", async () => {
+    const d = Object.fromEntries(new FormData($("form", fondo)));
+    if (!d.marca.trim() && !d.placa.trim()) return toast("Escribe al menos la marca o la placa.", "error");
+    const { error } = await sb.from("vehiculos").insert({
+      cliente_id: c.id, tipo: d.tipo || null, marca: d.marca.trim() || null, referencia: d.referencia.trim() || null,
+      anio: d.anio.trim() || null, placa: d.placa.trim().toUpperCase() || null, color: d.color.trim() || null
+    });
+    if (error) return toast(traducirError(error), "error");
+    toast("Vehículo agregado");
+    ["marca", "referencia", "anio", "placa", "color"].forEach((n) => { $(`[name=${n}]`, fondo).value = ""; });
+    pintar(); alCambiar();
+  });
+  pintar();
+}
+
+// ---------- Proveedores ----------
+async function vistaProveedores(el) {
+  await cargarOpciones();
+  el.innerHTML = encabezado("Proveedores", "A quién le compran materiales e insumos.",
+    `<button class="btn btn-rojo" id="nuevo-prov">+ Agregar proveedor</button>`) +
+    `<div class="panel">
+      ${barraBusqueda("q-prov", "Buscar proveedor…",
+        `<select id="f-prov"><option value="">Todas las categorías</option>${ops("proveedor_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`)}
+      <div class="tabla-wrap" id="t-prov"><p class="vacio">Cargando…</p></div>
+    </div>`;
+
+  const { data, error } = await sb.from("proveedores").select("*").order("nombre");
+  if (error) { $("#t-prov", el).innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+  const recargar = () => vistaProveedores(el);
+
+  const pintar = () => {
+    const q = $("#q-prov", el).value, cat = $("#f-prov", el).value;
+    const lista = data.filter((p) => coincide([p.nombre, p.nit, p.contacto, p.telefono, p.email, p.notas].filter(Boolean).join(" "), q) && (!cat || p.categoria === cat));
+    $("#t-prov", el).innerHTML = !lista.length
+      ? `<p class="vacio">No hay proveedores que coincidan.</p>`
+      : `<table><thead><tr><th>Proveedor</th><th>NIT</th><th>Contacto</th><th>Categoría</th><th></th></tr></thead><tbody>
+        ${lista.map((p) => `<tr>
+          <td><b>${esc(p.nombre)}</b>${p.notas ? `<span class="sub">${esc(p.notas)}</span>` : ""}</td>
+          <td>${esc(p.nit || "—")}</td>
+          <td>${esc(p.contacto || "—")}<span class="sub">${esc([p.telefono, p.email].filter(Boolean).join(" · "))}</span></td>
+          <td>${esc(p.categoria || "—")}</td>
+          <td><div class="acciones">
+            <button class="btn btn-chico" data-acc="editar|${p.id}">Editar</button>
+            <button class="btn btn-chico btn-texto" data-acc="borrar|${p.id}">Eliminar</button>
+          </div></td></tr>`).join("")}
+      </tbody></table>`;
+  };
+  pintar();
+
+  $("#q-prov", el).addEventListener("input", pintar);
+  $("#f-prov", el).addEventListener("change", pintar);
+  $("#nuevo-prov", el).addEventListener("click", () => formProveedor(null, recargar));
+  $("#t-prov", el).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const p = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formProveedor(p, recargar);
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar al proveedor "${p.nombre}"?`)) return;
+      const { error } = await sb.from("proveedores").delete().eq("id", p.id);
+      if (error) return toast(error.code === "23503" ? "Este proveedor tiene gastos o materiales asociados." : traducirError(error), "error");
+      toast("Proveedor eliminado"); recargar();
+    }
+  });
+}
+
+function formProveedor(p, alGuardar) {
+  const nuevo = !p;
+  const v = (campo) => esc(p?.[campo] ?? "");
+  abrirModal({
+    titulo: nuevo ? "Agregar proveedor" : "Editar proveedor",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Nombre *</label><input name="nombre" required value="${v("nombre")}"></div>
+        <div class="campo"><label>NIT</label><input name="nit" value="${v("nit")}"></div>
+        <div class="campo"><label>Persona de contacto</label><input name="contacto" value="${v("contacto")}"></div>
+        <div class="campo"><label>Teléfono</label><input name="telefono" type="tel" value="${v("telefono")}"></div>
+        <div class="campo"><label>Correo</label><input name="email" type="email" value="${v("email")}"></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "proveedor_categoria", p?.categoria)}</div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" placeholder="Días de entrega, formas de pago…" value="${v("notas")}"></div>`,
+    alGuardar: async (d) => {
+      const datos = {
+        nombre: d.nombre.trim(), nit: d.nit.trim() || null, contacto: d.contacto.trim() || null,
+        telefono: d.telefono.trim() || null, email: d.email.trim() || null,
+        categoria: d.categoria || null, notas: d.notas.trim() || null
+      };
+      const { error } = nuevo ? await sb.from("proveedores").insert(datos) : await sb.from("proveedores").update(datos).eq("id", p.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Proveedor agregado" : "Proveedor actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Precios ----------
+async function vistaPrecios(el) {
+  await cargarOpciones();
+  const esAdmin = perfil.rol === "admin";
+  el.innerHTML = encabezado("Precios", esAdmin
+    ? "Tabla de precios por tipo de vehículo."
+    : "Consulta los precios actualizados de servicios y productos.",
+    esAdmin ? `<button class="btn btn-rojo" id="nuevo-serv">+ Agregar servicio o producto</button>` : "") +
+    `<div class="panel">
+      ${barraBusqueda("q-pre", "Buscar servicio o producto…",
+        `<select id="f-tipo-serv"><option value="">Servicios y productos</option><option>Servicio</option><option>Producto</option></select>
+         <select id="f-cat-serv"><option value="">Todas las categorías</option>${ops("servicio_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`)}
+      <div class="tabla-wrap" id="t-pre"><p class="vacio">Cargando…</p></div>
+    </div>`;
+
+  const [cat, pv] = await Promise.all([
+    sb.from("catalogo").select("*").order("categoria").order("nombre"),
+    sb.from("precios_vehiculo").select("*")
+  ]);
+  if (cat.error) { $("#t-pre", el).innerHTML = `<p class="vacio">${esc(traducirError(cat.error))}</p>`; return; }
+  const data = cat.data, precios = pv.data || [];
+  const tipos = ops("tipo_vehiculo");
+  const recargar = () => vistaPrecios(el);
+  const precioDe = (id, tipo) => precios.find((x) => x.catalogo_id === id && x.tipo_vehiculo === tipo);
+
+  const pintar = () => {
+    const q = $("#q-pre", el).value, tipo = $("#f-tipo-serv", el).value, cate = $("#f-cat-serv", el).value;
+    const lista = data.filter((s) => coincide([s.nombre, s.categoria, s.descripcion].filter(Boolean).join(" "), q) &&
+      (!tipo || s.tipo === tipo) && (!cate || s.categoria === cate) && (esAdmin || s.activo));
+    $("#t-pre", el).innerHTML = !lista.length
+      ? `<p class="vacio">No hay servicios ni productos que coincidan. ${esAdmin ? "Agrega el primero." : ""}</p>`
+      : `<table><thead><tr><th>Servicio o producto</th><th>Categoría</th><th>Precio base</th>
+          ${tipos.map((t) => `<th>${esc(t)}</th>`).join("")}${esAdmin ? "<th></th>" : ""}</tr></thead><tbody>
+        ${lista.map((s) => `<tr class="${s.activo ? "" : "fila-futura"}">
+          <td><b>${esc(s.nombre)}</b><span class="sub">${esc(s.tipo)}${s.descripcion ? " · " + esc(s.descripcion) : ""}</span></td>
+          <td>${esc(s.categoria || "—")}</td>
+          <td><b>${pesos(s.precio)}</b></td>
+          ${tipos.map((t) => {
+            const p = precioDe(s.id, t);
+            return `<td>${p && Number(p.precio) ? pesos(p.precio) : `<span class="sub">—</span>`}</td>`;
+          }).join("")}
+          ${esAdmin ? `<td><div class="acciones">
+            <button class="btn btn-chico btn-rojo" data-acc="precios|${s.id}">Precios</button>
+            <button class="btn btn-chico" data-acc="editar|${s.id}">Editar</button>
+            <button class="btn btn-chico btn-texto" data-acc="borrar|${s.id}">Eliminar</button>
+          </div></td>` : ""}
+        </tr>`).join("")}
+      </tbody></table>
+      <p class="ayuda" style="margin-top:1rem">El precio base se usa cuando el tipo de vehículo no tiene un precio propio. Un guion significa que aplica el precio base.</p>`;
+  };
+  pintar();
+
+  $("#q-pre", el).addEventListener("input", pintar);
+  $("#f-tipo-serv", el).addEventListener("change", pintar);
+  $("#f-cat-serv", el).addEventListener("change", pintar);
+  if (esAdmin) {
+    $("#nuevo-serv", el).addEventListener("click", () => formServicio(null, recargar));
+    $("#t-pre", el).addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-acc]");
+      if (!b) return;
+      const [accion, id] = b.dataset.acc.split("|");
+      const s = data.find((x) => String(x.id) === id);
+      if (accion === "editar") formServicio(s, recargar);
+      if (accion === "precios") modalPreciosVehiculo(s, tipos, precios.filter((x) => x.catalogo_id === s.id), recargar);
+      if (accion === "borrar") {
+        if (!confirm(`¿Eliminar "${s.nombre}" de la tabla de precios?`)) return;
+        const { error } = await sb.from("catalogo").delete().eq("id", s.id);
+        if (error) return toast(error.code === "23503" ? "Ya se usó en facturas o cotizaciones. Mejor desactívalo." : traducirError(error), "error");
+        toast("Eliminado"); recargar();
+      }
+    });
+  }
+}
+
+function formServicio(s, alGuardar) {
+  const nuevo = !s;
+  abrirModal({
+    titulo: nuevo ? "Agregar servicio o producto" : "Editar",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Nombre *</label><input name="nombre" required placeholder="Tapizado completo en cuero" value="${esc(s?.nombre ?? "")}"></div>
+        <div class="campo"><label>Tipo</label><select name="tipo">
+          <option ${s?.tipo !== "Producto" ? "selected" : ""}>Servicio</option>
+          <option ${s?.tipo === "Producto" ? "selected" : ""}>Producto</option></select></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "servicio_categoria", s?.categoria)}</div>
+        <div class="campo"><label>Precio base</label><input type="number" step="1" min="0" name="precio" value="${s?.precio ?? 0}"></div>
+        <div class="campo"><label>Costo estimado</label><input type="number" step="1" min="0" name="costo_estimado" value="${s?.costo_estimado ?? 0}"></div>
+        <div class="campo"><label>Estado</label><select name="activo">
+          <option value="si" ${s?.activo !== false ? "selected" : ""}>Activo</option>
+          <option value="no" ${s?.activo === false ? "selected" : ""}>Inactivo</option></select></div>
+      </div>
+      <div class="campo"><label>Descripción</label><input name="descripcion" value="${esc(s?.descripcion ?? "")}"></div>
+      <p class="ayuda">El costo estimado es lo que les cuesta hacerlo (materiales y mano de obra). Sirve para ver la ganancia en la Fase 8.</p>`,
+    alGuardar: async (d) => {
+      const datos = {
+        nombre: d.nombre.trim(), tipo: d.tipo, categoria: d.categoria || null,
+        precio: Number(d.precio) || 0, costo_estimado: Number(d.costo_estimado) || 0,
+        descripcion: d.descripcion.trim() || null, activo: d.activo === "si", updated_at: new Date().toISOString()
+      };
+      const { error } = nuevo ? await sb.from("catalogo").insert(datos) : await sb.from("catalogo").update(datos).eq("id", s.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Agregado a la tabla de precios" : "Actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+function modalPreciosVehiculo(s, tipos, actuales, alGuardar) {
+  const valor = (t, campo) => actuales.find((x) => x.tipo_vehiculo === t)?.[campo] ?? "";
+  abrirModal({
+    titulo: `Precios por vehículo · ${s.nombre}`,
+    botonTexto: "Guardar precios",
+    cuerpo: `<p class="ayuda">Llena solo los tipos de vehículo que tengan un precio distinto al base (${pesos(s.precio)}). Los que dejes vacíos usan el precio base.</p>
+      <div class="tabla-wrap"><table class="tabla-config">
+        <thead><tr><th>Tipo de vehículo</th><th>Precio</th><th>Costo estimado</th></tr></thead>
+        <tbody>${tipos.map((t) => `<tr data-tipo="${esc(t)}">
+          <td><b>${esc(t)}</b></td>
+          <td><input type="number" step="1" min="0" name="precio" value="${valor(t, "precio")}" placeholder="${s.precio}"></td>
+          <td><input type="number" step="1" min="0" name="costo" value="${valor(t, "costo_estimado")}" placeholder="${s.costo_estimado}"></td>
+        </tr>`).join("")}</tbody>
+      </table></div>`,
+    alGuardar: async (d, form) => {
+      const filas = [...form.querySelectorAll("tr[data-tipo]")];
+      const guardar = [], borrar = [];
+      for (const tr of filas) {
+        const tipo = tr.dataset.tipo;
+        const precio = $("[name=precio]", tr).value, costo = $("[name=costo]", tr).value;
+        if (precio === "" && costo === "") borrar.push(tipo);
+        else guardar.push({ catalogo_id: s.id, tipo_vehiculo: tipo, precio: Number(precio) || 0, costo_estimado: Number(costo) || 0 });
+      }
+      if (borrar.length) {
+        const { error } = await sb.from("precios_vehiculo").delete().eq("catalogo_id", s.id).in("tipo_vehiculo", borrar);
+        if (error) { toast(traducirError(error), "error"); return false; }
+      }
+      if (guardar.length) {
+        const { error } = await sb.from("precios_vehiculo").upsert(guardar, { onConflict: "catalogo_id,tipo_vehiculo" });
+        if (error) { toast(traducirError(error), "error"); return false; }
+      }
+      toast("Precios guardados");
+      alGuardar();
+      return true;
     }
   });
 }

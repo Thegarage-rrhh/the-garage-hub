@@ -20,14 +20,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--blanco); }
 
 /* ---------- Botones ---------- */
-.btn { display: inline-flex; align-items: center; gap: .4rem; border: 1px solid var(--linea); background: var(--panel-2); padding: .55rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; white-space: nowrap; }
-.btn:hover { border-color: var(--gris); }
+.btn { display: inline-flex; align-items: center; gap: .4rem; border: 1px solid #7a7a7a; background: #0d0d0d; color: var(--blanco); padding: .55rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.btn:hover { background: #2a2a2a; border-color: var(--blanco); }
 .btn-rojo { background: var(--rojo); border-color: var(--rojo); }
 .btn-rojo:hover { background: var(--rojo-oscuro); border-color: var(--rojo-oscuro); }
-.btn-chico { padding: .3rem .65rem; font-size: .875rem; }
-.btn-texto { background: none; border-color: transparent; color: var(--gris); }
-.btn-texto:hover { color: var(--blanco); border-color: transparent; }
-.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn-chico { padding: .35rem .7rem; font-size: .9rem; }
+.btn-texto { background: none; border-color: transparent; color: #CFCFCF; text-decoration: underline; }
+.btn-texto:hover { color: var(--blanco); background: none; border-color: transparent; }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
 
 /* ---------- Formularios ---------- */
 .campo { display: flex; flex-direction: column; gap: .3rem; }
@@ -160,6 +160,25 @@ details[open] summary::after { content: " −"; }
 .tarea-acciones .btn-grande { width: auto; min-width: 130px; }
 .campo textarea { resize: vertical; }
 @media (max-width: 640px) { .tarea-acciones { width: 100%; } .tarea-acciones .btn-grande { flex: 1 1 130px; } }
+
+/* ---------- Fase 4 · Inventarios ---------- */
+.pestanas { display: flex; gap: .25rem; border-bottom: 1px solid var(--linea); margin-bottom: 1.25rem; flex-wrap: wrap; }
+.pestana { background: none; border: 0; border-bottom: 3px solid transparent; color: var(--gris); padding: .6rem 1rem; cursor: pointer; font-weight: 600; }
+.pestana:hover { color: var(--blanco); }
+.pestana.activa { color: var(--blanco); border-bottom-color: var(--rojo); }
+.barra-inv { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.barra-inv input[type=search] { flex: 2 1 240px; background: var(--negro); border: 1px solid var(--linea); border-radius: 4px; padding: .6rem .75rem; }
+.barra-inv select { flex: 1 1 150px; background: var(--negro); border: 1px solid var(--linea); border-radius: 4px; padding: .6rem .5rem; }
+.barra-inv input[type=search]:focus, .barra-inv select:focus { border-color: var(--rojo); outline: none; }
+.texto-alerta { color: #FF8A8E; }
+.chips-check { display: flex; flex-wrap: wrap; gap: .5rem; }
+.check { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--linea); border-radius: 4px; padding: .35rem .6rem; cursor: pointer; }
+.check input { accent-color: var(--rojo); }
+.lista-grupo { padding: .75rem 0; border-bottom: 1px solid var(--linea); }
+.lista-grupo:last-child { border-bottom: 0; }
+.chip-apagado { opacity: .45; }
+.chip-x { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 0 0 .35rem; font-size: .8rem; }
+.chip-x:hover { color: var(--rojo); }
 
 /* ---------- Celular ---------- */
 @media (max-width: 860px) {

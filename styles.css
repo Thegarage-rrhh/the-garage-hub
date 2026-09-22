@@ -150,6 +150,17 @@ details[open] summary::after { content: " −"; }
   .jornada { grid-template-columns: 1fr; }
 }
 
+/* ---------- Fase 3 · Tareas ---------- */
+.tarea { border-left: 4px solid var(--linea); }
+.tarea.corriendo { border-left-color: var(--verde); }
+.tarea h3 { font-family: var(--display); font-weight: 600; font-size: 1.4rem; margin: 0 0 .25rem; }
+.tarea .sub { color: var(--gris); margin: 0 0 .5rem; font-size: .95rem; }
+.tarea-top { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: flex-start; }
+.tarea-acciones { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.tarea-acciones .btn-grande { width: auto; min-width: 130px; }
+.campo textarea { resize: vertical; }
+@media (max-width: 640px) { .tarea-acciones { width: 100%; } .tarea-acciones .btn-grande { flex: 1 1 130px; } }
+
 /* ---------- Celular ---------- */
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }

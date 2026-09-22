@@ -1,6 +1,6 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 2
-//  Login · Roles · Empleados · Novedades · Cuentas · Asistencia
+//  THE GARAGE HUB · Fase 3
+//  Login · Roles · Empleados · Cuentas · Asistencia · Tareas
 // =====================================================
 
 const root = document.getElementById("root");
@@ -88,7 +88,7 @@ const MENU = {
       { id: "empleados", label: "Empleados", listo: true },
       { id: "asistencia", label: "Asistencia", listo: true },
       { id: "jornada", label: "Mi jornada", listo: true },
-      { id: "tareas", label: "Tareas", fase: 3 } ] },
+      { id: "tareas", label: "Tareas", listo: true } ] },
     { grupo: "Operación", items: [
       { id: "inventarios", label: "Inventarios", fase: 4 },
       { id: "agenda", label: "Agenda de entregas", fase: 7 } ] },
@@ -105,7 +105,7 @@ const MENU = {
     { grupo: "Mi día", items: [
       { id: "inicio", label: "Inicio", listo: true },
       { id: "jornada", label: "Mi jornada", listo: true },
-      { id: "mis-tareas", label: "Mis tareas", fase: 3 } ] },
+      { id: "mis-tareas", label: "Mis tareas", listo: true } ] },
     { grupo: "Consultas", items: [
       { id: "inventario", label: "Inventario", fase: 4 },
       { id: "moldes", label: "Moldes", fase: 4 },
@@ -113,7 +113,7 @@ const MENU = {
   ]
 };
 
-const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia };
+const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -205,6 +205,7 @@ function mostrarApp() {
 function navegar() {
   if (!perfil) return;
   if (intervalo) { clearInterval(intervalo); intervalo = null; }
+  if (intervaloTareas) { clearInterval(intervaloTareas); intervaloTareas = null; }
   const menu = MENU[perfil.rol].flatMap((g) => g.items);
   let id = location.hash.replace("#", "") || "inicio";
   let item = menu.find((i) => i.id === id);
@@ -235,6 +236,8 @@ async function vistaInicio(el) {
 
   if (perfil.rol !== "admin") {
     await vistaJornada(el, false);
+    el.insertAdjacentHTML("beforeend", `<h3 class="subtitulo">Mis tareas</h3>`);
+    await vistaMisTareas(el, false);
     return;
   }
 
@@ -243,14 +246,16 @@ async function vistaInicio(el) {
       <p style="margin-top:0">Registra a tu equipo en <b>Empleados</b> y revisa que las <b>Cuentas de dinero</b> sean las correctas. Las demás secciones se irán activando fase por fase.</p>
     </div>`;
 
-  const [emp, cue, nov] = await Promise.all([
+  const [emp, cue, nov, tar] = await Promise.all([
     sb.from("perfiles").select("id", { count: "exact", head: true }).eq("activo", true),
     sb.from("cuentas").select("id", { count: "exact", head: true }).eq("activa", true),
-    sb.from("novedades_empleado").select("id", { count: "exact", head: true }).gte("fecha_inicio", hoyISO().slice(0, 7) + "-01")
+    sb.from("novedades_empleado").select("id", { count: "exact", head: true }).gte("fecha_inicio", hoyISO().slice(0, 7) + "-01"),
+    sb.from("tareas").select("id", { count: "exact", head: true }).eq("fecha", hoyISO()).neq("estado", "terminada")
   ]);
   $("#cifras").innerHTML = `
     <div class="cifra"><b>${emp.count ?? 0}</b><span>Personas con acceso activo</span></div>
     <div class="cifra"><b>${cue.count ?? 0}</b><span>Cuentas de dinero activas</span></div>
+    <div class="cifra"><b>${tar.count ?? 0}</b><span>Tareas de hoy sin terminar</span></div>
     <div class="cifra"><b>${nov.count ?? 0}</b><span>Novedades registradas este mes</span></div>`;
 }
 
@@ -856,6 +861,281 @@ function pintarConfigHorarios(cont, horarios, aj) {
     if (fallo) return toast(traducirError(fallo.error), "error");
     toast("Horarios guardados");
     navegar();
+  });
+}
+
+// =====================================================
+//  FASE 3 · TAREAS Y CONTROL DE TIEMPOS
+// =====================================================
+let intervaloTareas = null;
+let diaTareas = null;
+
+const ESTADO_TAREA = {
+  pendiente: { texto: "Pendiente", clase: "" },
+  en_progreso: { texto: "En progreso", clase: "chip-ok" },
+  pausada: { texto: "Pausada", clase: "chip-aviso" },
+  terminada: { texto: "Terminada", clase: "chip-info" }
+};
+
+// Suma los minutos reales de una tarea y dice si está corriendo
+function tiempoTarea(tramos) {
+  let min = 0, corriendo = null;
+  for (const t of tramos) {
+    const ini = new Date(t.inicio).getTime();
+    const fin = t.fin ? new Date(t.fin).getTime() : Date.now();
+    min += (fin - ini) / 60000;
+    if (!t.fin) corriendo = ini;
+  }
+  return { min, corriendo };
+}
+
+async function cargarTareas(filtro) {
+  const tareas = await filtro;
+  if (tareas.error) return { error: tareas.error };
+  const ids = tareas.data.map((t) => t.id);
+  if (!ids.length) return { tareas: [], tramos: [] };
+  const tramos = await sb.from("tarea_tiempos").select("*").in("tarea_id", ids).order("inicio");
+  if (tramos.error) return { error: tramos.error };
+  return { tareas: tareas.data, tramos: tramos.data };
+}
+
+// ---------- Vista empleado: Mis tareas ----------
+async function vistaMisTareas(el, conEncabezado = true) {
+  if (conEncabezado) el.innerHTML = encabezado("Mis tareas", "Inicia y termina tus tareas para llevar el tiempo real.");
+  const cont = document.createElement("div");
+  cont.innerHTML = `<p class="vacio">Cargando…</p>`;
+  el.appendChild(cont);
+
+  const hoy = hoyISO();
+  const r = await cargarTareas(
+    sb.from("tareas").select("*").eq("empleado_id", perfil.id).gte("fecha", sumarDias(hoy, -60)).order("fecha").order("id")
+  );
+  if (r.error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(r.error))}</p>`; return; }
+
+  const visibles = r.tareas.filter((t) => t.estado !== "terminada" || t.fecha === hoy);
+  if (!visibles.length) {
+    cont.innerHTML = `<div class="panel"><p class="vacio">No tienes tareas asignadas. Tu administrador te las asigna desde el HUB.</p></div>`;
+    return;
+  }
+
+  const tramosDe = (id) => r.tramos.filter((x) => x.tarea_id === id);
+  const activa = visibles.find((t) => t.estado === "en_progreso");
+
+  const tarjeta = (t) => {
+    const { min, corriendo } = tiempoTarea(tramosDe(t.id));
+    const est = ESTADO_TAREA[t.estado];
+    const terminada = t.estado === "terminada";
+    const atrasada = t.minutos_estimados && min > t.minutos_estimados;
+    return `<div class="panel tarea ${corriendo ? "corriendo" : ""}">
+      <div class="tarea-top">
+        <div>
+          <h3>${esc(t.titulo)}</h3>
+          ${t.descripcion ? `<p class="sub">${esc(t.descripcion)}</p>` : ""}
+          <div class="chips">
+            <span class="chip ${est.clase}">${est.texto}</span>
+            ${t.fecha !== hoy ? `<span class="chip chip-aviso">De ${fechaCorta(t.fecha)}</span>` : ""}
+            ${t.minutos_estimados ? `<span class="chip">Estimado: ${duracion(t.minutos_estimados)}</span>` : ""}
+            <span class="chip ${atrasada ? "chip-alerta" : ""}">Real: <b data-tiempo="${t.id}">${duracion(min)}</b></span>
+          </div>
+        </div>
+        <div class="tarea-acciones">
+          ${terminada ? `<span class="chip chip-info">✔ Lista</span>` : `
+            ${corriendo
+              ? `<button class="btn btn-grande" data-tarea="pausar|${t.id}">Pausar</button>`
+              : `<button class="btn btn-grande btn-rojo" data-tarea="iniciar|${t.id}">${min ? "Continuar" : "Iniciar"}</button>`}
+            <button class="btn btn-grande" data-tarea="terminar|${t.id}">Terminar</button>`}
+        </div>
+      </div>
+    </div>`;
+  };
+
+  cont.innerHTML = `
+    ${activa ? `<div class="panel estado-jornada ok" id="tarea-activa"></div>` : ""}
+    <h3 class="subtitulo">Por hacer</h3>
+    ${visibles.filter((t) => t.estado !== "terminada").map(tarjeta).join("") || `<div class="panel"><p class="vacio">Todo al día.</p></div>`}
+    ${visibles.some((t) => t.estado === "terminada") ? `<h3 class="subtitulo">Terminadas hoy</h3>${visibles.filter((t) => t.estado === "terminada").map(tarjeta).join("")}` : ""}`;
+
+  const refrescar = () => {
+    for (const t of visibles) {
+      const { min } = tiempoTarea(tramosDe(t.id));
+      const b = cont.querySelector(`[data-tiempo="${t.id}"]`);
+      if (b) b.textContent = duracion(min);
+    }
+    const box = $("#tarea-activa", cont);
+    if (box && activa) {
+      const { min, corriendo } = tiempoTarea(tramosDe(activa.id));
+      box.innerHTML = `<span class="estado-titulo">${esc(activa.titulo)}</span>
+        <p>Trabajando ahora · <b>${reloj((corriendo ? Date.now() - corriendo : 0))}</b> en este tramo · ${duracion(min)} en total</p>`;
+    }
+  };
+  refrescar();
+  if (intervaloTareas) clearInterval(intervaloTareas);
+  intervaloTareas = setInterval(refrescar, 1000);
+
+  cont.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-tarea]");
+    if (!b) return;
+    const [accion, id] = b.dataset.tarea.split("|");
+    b.disabled = true;
+    let error = null;
+    if (accion === "iniciar") {
+      ({ error } = await sb.from("tarea_tiempos").insert({ tarea_id: Number(id) }));
+    } else {
+      const cierre = await sb.from("tarea_tiempos").update({ fin: new Date().toISOString() }).eq("tarea_id", Number(id)).is("fin", null);
+      error = cierre.error;
+      if (!error) ({ error } = await sb.from("tareas").update({ estado: accion === "terminar" ? "terminada" : "pausada" }).eq("id", Number(id)));
+    }
+    if (error) { b.disabled = false; return toast(traducirError(error), "error"); }
+    toast(accion === "iniciar" ? "Cronómetro iniciado" : accion === "pausar" ? "Tarea pausada" : "¡Tarea terminada!");
+    navegar();
+  });
+}
+
+// ---------- Vista admin: Tareas ----------
+async function vistaTareasAdmin(el) {
+  if (!diaTareas) diaTareas = hoyISO();
+  const hoy = hoyISO();
+
+  el.innerHTML = encabezado("Tareas", `${diaTareas === hoy ? "Hoy · " : ""}${fechaCorta(diaTareas)}`,
+    `<div class="acciones">
+      <button class="btn" data-dia="-1">←</button>
+      <button class="btn" data-dia="0">Hoy</button>
+      <button class="btn" data-dia="1">→</button>
+      <button class="btn btn-rojo" id="nueva-tarea">+ Asignar tarea</button>
+    </div>`) + `<div id="lista-tareas"><p class="vacio">Cargando…</p></div>`;
+
+  $(".titulo-pagina .acciones", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-dia]");
+    if (!b) return;
+    diaTareas = b.dataset.dia === "0" ? hoy : sumarDias(diaTareas, Number(b.dataset.dia));
+    vistaTareasAdmin(el);
+  });
+
+  const per = await sb.from("perfiles").select("id,nombre,email,cargo,rol,activo").eq("activo", true).order("nombre");
+  const empleados = (per.data || []).filter((p) => p.rol === "empleado");
+  $("#nueva-tarea", el).addEventListener("click", () => formTarea(null, empleados, () => vistaTareasAdmin(el)));
+
+  const r = await cargarTareas(
+    sb.from("tareas").select("*").gte("fecha", sumarDias(diaTareas, -60)).lte("fecha", diaTareas).order("id")
+  );
+  if (r.error) { $("#lista-tareas", el).innerHTML = `<p class="vacio">${esc(traducirError(r.error))}</p>`; return; }
+
+  const delDia = r.tareas.filter((t) => t.fecha === diaTareas);
+  const atrasadas = r.tareas.filter((t) => t.fecha < diaTareas && t.estado !== "terminada");
+  const nombre = (id) => (per.data || []).find((p) => p.id === id)?.nombre || "Sin asignar";
+
+  const fila = (t) => {
+    const { min, corriendo } = tiempoTarea(r.tramos.filter((x) => x.tarea_id === t.id));
+    const est = ESTADO_TAREA[t.estado];
+    const dif = t.minutos_estimados ? min - t.minutos_estimados : null;
+    return `<tr>
+      <td><b>${esc(t.titulo)}</b>${t.descripcion ? `<span class="sub">${esc(t.descripcion)}</span>` : ""}</td>
+      <td>${esc(nombre(t.empleado_id))}</td>
+      <td><span class="chip ${est.clase}">${est.texto}</span>${corriendo ? ` <span class="chip chip-ok">▶</span>` : ""}</td>
+      <td>${t.minutos_estimados ? duracion(t.minutos_estimados) : "—"}</td>
+      <td>${min ? duracion(min) : "—"}</td>
+      <td>${dif === null || !min ? "—" : t.estado !== "terminada"
+        ? (dif > 0 ? `<span class="chip chip-alerta">+${duracion(dif)}</span>` : `<span class="chip">En curso</span>`)
+        : `<span class="chip ${dif > 0 ? "chip-alerta" : "chip-ok"}">${dif > 0 ? "+" : "−"}${duracion(Math.abs(dif))}</span>`}</td>
+      <td><div class="acciones">
+        <button class="btn btn-chico" data-acc="tiempos|${t.id}">Tiempos</button>
+        <button class="btn btn-chico" data-acc="editar|${t.id}">Editar</button>
+        <button class="btn btn-chico btn-texto" data-acc="borrar|${t.id}">Eliminar</button>
+      </div></td>
+    </tr>`;
+  };
+
+  const tabla = (lista) => `<div class="tabla-wrap"><table>
+    <thead><tr><th>Tarea</th><th>Empleado</th><th>Estado</th><th>Estimado</th><th>Real</th><th>Diferencia</th><th></th></tr></thead>
+    <tbody>${lista.map(fila).join("")}</tbody></table></div>`;
+
+  $("#lista-tareas", el).innerHTML = `
+    <div class="panel"><h2>Tareas del día</h2>
+      ${delDia.length ? tabla(delDia) : `<p class="vacio">No hay tareas para este día. Asigna la primera.</p>`}
+    </div>
+    ${atrasadas.length ? `<div class="panel"><h2>Vienen de días anteriores</h2>${tabla(atrasadas)}</div>` : ""}`;
+
+  $("#lista-tareas", el).onclick = async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const t = r.tareas.find((x) => String(x.id) === id);
+    if (accion === "editar") formTarea(t, empleados, () => vistaTareasAdmin(el));
+    if (accion === "tiempos") modalTiempos(t, nombre(t.empleado_id), r.tramos.filter((x) => x.tarea_id === t.id));
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar la tarea "${t.titulo}"? También se borra su historial de tiempos.`)) return;
+      const { error } = await sb.from("tareas").delete().eq("id", t.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Tarea eliminada");
+      vistaTareasAdmin(el);
+    }
+  };
+}
+
+function formTarea(t, empleados, alGuardar) {
+  const nuevo = !t;
+  abrirModal({
+    titulo: nuevo ? "Asignar tarea" : "Editar tarea",
+    botonTexto: nuevo ? "Asignar" : "Guardar cambios",
+    cuerpo: `
+      <div class="campo"><label>Tarea *</label>
+        <input name="titulo" required placeholder="Ej: Tapizar sillas Mazda 3" value="${esc(t?.titulo ?? "")}"></div>
+      <div class="campo"><label>Detalles</label>
+        <textarea name="descripcion" rows="2" placeholder="Color, material, placa del carro, observaciones…">${esc(t?.descripcion ?? "")}</textarea></div>
+      <div class="rejilla">
+        <div class="campo"><label>Empleado *</label><select name="empleado_id" required>
+          <option value="">Selecciona…</option>
+          ${empleados.map((p) => `<option value="${p.id}" ${t?.empleado_id === p.id ? "selected" : ""}>${esc(p.nombre || p.email)}</option>`).join("")}
+        </select></div>
+        <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${esc(t?.fecha ?? diaTareas ?? hoyISO())}"></div>
+        <div class="campo"><label>Tiempo estimado (minutos)</label>
+          <input type="number" min="0" name="minutos_estimados" placeholder="Ej: 120" value="${t?.minutos_estimados ?? ""}"></div>
+        ${nuevo ? "" : `<div class="campo"><label>Estado</label><select name="estado">
+          ${Object.entries(ESTADO_TAREA).map(([k, v]) => `<option value="${k}" ${t.estado === k ? "selected" : ""}>${v.texto}</option>`).join("")}
+        </select></div>`}
+      </div>`,
+    alGuardar: async (d) => {
+      const datos = {
+        titulo: d.titulo.trim(),
+        descripcion: d.descripcion.trim() || null,
+        empleado_id: d.empleado_id,
+        fecha: d.fecha || hoyISO(),
+        minutos_estimados: d.minutos_estimados ? Number(d.minutos_estimados) : null
+      };
+      if (!nuevo) datos.estado = d.estado;
+      const { error } = nuevo
+        ? await sb.from("tareas").insert(datos)
+        : await sb.from("tareas").update(datos).eq("id", t.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Tarea asignada" : "Tarea actualizada");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+function modalTiempos(t, nombreEmpleado, tramos) {
+  const { min } = tiempoTarea(tramos);
+  abrirModal({
+    titulo: `Tiempos · ${t.titulo}`,
+    sinPie: true,
+    cuerpo: `
+      <div class="chips">
+        <span class="chip">${esc(nombreEmpleado)}</span>
+        <span class="chip">Total real: ${duracion(min)}</span>
+        ${t.minutos_estimados ? `<span class="chip">Estimado: ${duracion(t.minutos_estimados)}</span>` : ""}
+      </div>
+      ${tramos.length ? `<div class="tabla-wrap"><table>
+        <thead><tr><th>Día</th><th>Desde</th><th>Hasta</th><th>Duración</th><th>Pausa</th></tr></thead>
+        <tbody>${tramos.map((x) => {
+          const fin = x.fin ? new Date(x.fin).getTime() : Date.now();
+          return `<tr><td>${fechaCorta(new Date(x.inicio).toLocaleDateString("en-CA", { timeZone: TZ }))}</td>
+            <td>${horaCorta(x.inicio)}</td><td>${x.fin ? horaCorta(x.fin) : "En curso"}</td>
+            <td>${duracion((fin - new Date(x.inicio).getTime()) / 60000)}</td>
+            <td>${x.motivo_pausa === "auto" ? "Break / almuerzo" : esc(x.motivo_pausa || "—")}</td></tr>`;
+        }).join("")}</tbody></table></div>`
+        : `<p class="vacio">Esta tarea todavía no tiene tiempos registrados.</p>`}
+      <p class="ayuda">Los tramos se cortan solos cuando el empleado sale a break, a almuerzo o marca salida, para que el tiempo real no se infle.</p>`
   });
 }
 

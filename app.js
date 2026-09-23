@@ -2572,6 +2572,7 @@ async function panelGastos(cont) {
       <div class="cifra"><b>${data.length}</b><span>Gastos del mes</span></div>
       <div class="cifra"><b>${pesos(total)}</b><span>Total gastado</span></div>
     </div>
+    <div class="panel" id="panel-fijos"><p class="vacio">Cargando gastos fijos…</p></div>
     <div class="panel">
       ${barraBusqueda("q-gas", "Buscar por descripción, proveedor o número…",
         `<input type="month" id="mes-gas" value="${mesFactura}">
@@ -2601,6 +2602,7 @@ async function panelGastos(cont) {
   };
   pintar();
 
+  panelGastosFijos($("#panel-fijos", cont), proveedores, cuentas, recargar);
   $("#q-gas", cont).addEventListener("input", pintar);
   $("#f-cat-gas", cont).addEventListener("change", pintar);
   $("#mes-gas", cont).addEventListener("change", (e) => { mesFactura = e.target.value || mesActual(); panelGastos(cont); });
@@ -2956,7 +2958,7 @@ async function vistaContabilidad(el) {
     `<div id="cont-datos"><p class="vacio">Cargando…</p></div>`;
   $("#mes-cont", el).addEventListener("change", (e) => { mesContab = e.target.value || mesActual(); vistaContabilidad(el); });
 
-  const [fac, ite, pag, gas, cue, prevFac, prevGas, todasFac, todosPag] = await Promise.all([
+  const [fac, ite, pag, gas, cue, prevFac, prevGas, todasFac, todosPag, fijos, fijosMes] = await Promise.all([
     sb.from("facturas").select("*").gte("fecha", desde).lte("fecha", hasta),
     sb.from("factura_items").select("*"),
     sb.from("pagos").select("*").gte("fecha", desde).lte("fecha", hasta),
@@ -2965,7 +2967,9 @@ async function vistaContabilidad(el) {
     sb.from("facturas").select("total,estado_pago,fecha").gte("fecha", mesPrev + "-01").lte("fecha", finDeMes(mesPrev)),
     sb.from("gastos").select("monto").gte("fecha", mesPrev + "-01").lte("fecha", finDeMes(mesPrev)),
     sb.from("facturas").select("id,total,estado_pago,fecha,cliente_id").neq("estado_pago", "anulada"),
-    sb.from("pagos").select("factura_id,monto")
+    sb.from("pagos").select("factura_id,monto"),
+    sb.from("gastos_fijos").select("*").eq("activo", true),
+    sb.from("gastos").select("gasto_fijo_id").gte("fecha", desde).lte("fecha", hasta).not("gasto_fijo_id", "is", null)
   ]);
   const error = fac.error || pag.error || gas.error;
   if (error) { $("#cont-datos", el).innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
@@ -2990,6 +2994,9 @@ async function vistaContabilidad(el) {
   const gastosPrev = (prevGas.data || []).reduce((s, g) => s + Number(g.monto), 0);
 
   const sinCosto = items.filter((i) => !Number(i.costo_unitario)).length;
+  const generadosFijos = new Set((fijosMes.data || []).map((g) => g.gasto_fijo_id));
+  const fijosPendientes = (fijos.data || []).filter((f) => !generadosFijos.has(f.id));
+  const montoFijosPend = fijosPendientes.reduce((s, f) => s + Number(f.monto), 0);
 
   // ----- Por servicio / producto -----
   const porItem = {};
@@ -3053,6 +3060,8 @@ async function vistaContabilidad(el) {
       <div class="cifra"><b>${pesos(facturas.length ? facturado / facturas.length : 0)}</b><span>Venta promedio por factura</span></div>
     </div>
 
+    ${fijosPendientes.length ? `<div class="panel aviso-panel"><b>Faltan gastos fijos por registrar.</b> ${fijosPendientes.length} concepto(s) de ${NOMBRE_MES(mesContab)} suman ${pesos(montoFijosPend)} y todavía no están en los números de arriba. Los registras en <b>Facturación → Gastos</b>.</div>` : ""}
+
     ${sinCosto ? `<div class="panel aviso-panel"><b>Faltan costos.</b> ${sinCosto} línea(s) facturada(s) este mes no tienen costo registrado, así que la ganancia real es menor a la que ves. Puedes cargar los costos en <b>Precios</b>, en el campo "Costo estimado".</div>` : ""}
 
     <div class="dos-columnas">
@@ -3071,6 +3080,117 @@ async function vistaContabilidad(el) {
         </table></div>` : `<p class="vacio">Sin movimientos este mes.</p>`}
       </div>
     </div>`;
+}
+
+// ---------- Gastos fijos mensuales ----------
+async function panelGastosFijos(cont, proveedores, cuentas, alCambiar) {
+  const [fij, ya] = await Promise.all([
+    sb.from("gastos_fijos").select("*").order("nombre"),
+    sb.from("gastos").select("gasto_fijo_id").gte("fecha", mesFactura + "-01").lte("fecha", finDeMes(mesFactura)).not("gasto_fijo_id", "is", null)
+  ]);
+  if (fij.error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(fij.error))}</p>`; return; }
+  const fijos = fij.data || [];
+  const generados = new Set((ya.data || []).map((g) => g.gasto_fijo_id));
+  const activos = fijos.filter((f) => f.activo);
+  const pendientes = activos.filter((f) => !generados.has(f.id));
+  const totalFijos = activos.reduce((s, f) => s + Number(f.monto), 0);
+
+  cont.innerHTML = `<details ${pendientes.length ? "open" : ""}>
+    <summary><h2 style="display:inline;margin:0">Gastos fijos mensuales · ${pesos(totalFijos)}</h2></summary>
+    <p class="ayuda" style="margin-top:.75rem">Defines una vez lo que se paga todos los meses (nómina, servicios, internet…) y con un clic los registras en el mes que estés viendo.</p>
+    ${pendientes.length
+      ? `<div class="aviso-panel panel" style="margin:1rem 0"><b>Faltan por registrar ${pendientes.length} gasto(s) fijo(s)</b> de ${NOMBRE_MES(mesFactura)}, por ${pesos(pendientes.reduce((s, f) => s + Number(f.monto), 0))}.
+          <div style="margin-top:.75rem"><button class="btn btn-rojo" id="generar-fijos">Registrar los ${pendientes.length} gastos de este mes</button></div></div>`
+      : activos.length ? `<p class="ayuda"><span class="chip chip-ok">Al día</span> Todos los gastos fijos de ${NOMBRE_MES(mesFactura)} ya están registrados.</p>` : ""}
+
+    <div class="tabla-wrap">${!fijos.length
+      ? `<p class="vacio">Todavía no hay gastos fijos definidos.</p>`
+      : `<table><thead><tr><th>Concepto</th><th>Categoría</th><th>Monto</th><th>Día de pago</th><th>Este mes</th><th></th></tr></thead><tbody>
+        ${fijos.map((f) => `<tr class="${f.activo ? "" : "fila-futura"}">
+          <td><b>${esc(f.nombre)}</b>${f.notas ? `<span class="sub">${esc(f.notas)}</span>` : ""}</td>
+          <td>${esc(f.categoria || "—")}</td>
+          <td><b>${pesos(f.monto)}</b></td>
+          <td>${f.dia_pago}</td>
+          <td>${!f.activo ? `<span class="chip">Inactivo</span>`
+            : generados.has(f.id) ? `<span class="chip chip-ok">Registrado</span>` : `<span class="chip chip-aviso">Pendiente</span>`}</td>
+          <td><div class="acciones">
+            <button class="btn btn-chico" data-fijo="editar|${f.id}">Editar</button>
+            <button class="btn btn-chico" data-fijo="estado|${f.id}">${f.activo ? "Desactivar" : "Activar"}</button>
+            <button class="btn btn-chico btn-texto" data-fijo="borrar|${f.id}">Eliminar</button>
+          </div></td></tr>`).join("")}
+      </tbody></table>`}</div>
+    <div style="margin-top:1rem"><button class="btn" id="nuevo-fijo">+ Agregar gasto fijo</button></div>
+  </details>`;
+
+  const recargar = () => { panelGastosFijos(cont, proveedores, cuentas, alCambiar); alCambiar(); };
+
+  const btnGenerar = $("#generar-fijos", cont);
+  if (btnGenerar) btnGenerar.addEventListener("click", async () => {
+    btnGenerar.disabled = true;
+    const ultimoDia = Number(finDeMes(mesFactura).slice(-2));
+    const filas = pendientes.map((f) => ({
+      fecha: `${mesFactura}-${String(Math.min(f.dia_pago, ultimoDia)).padStart(2, "0")}`,
+      monto: f.monto, categoria: f.categoria, proveedor_id: f.proveedor_id, cuenta_id: f.cuenta_id,
+      descripcion: f.nombre, gasto_fijo_id: f.id
+    }));
+    const { error } = await sb.from("gastos").insert(filas);
+    if (error) { btnGenerar.disabled = false; return toast(traducirError(error), "error"); }
+    toast(`${filas.length} gasto(s) fijo(s) registrado(s)`);
+    recargar();
+  });
+
+  $("#nuevo-fijo", cont).addEventListener("click", () => formGastoFijo(null, proveedores, cuentas, recargar));
+  cont.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-fijo]");
+    if (!b) return;
+    const [accion, id] = b.dataset.fijo.split("|");
+    const f = fijos.find((x) => String(x.id) === id);
+    if (accion === "editar") formGastoFijo(f, proveedores, cuentas, recargar);
+    if (accion === "estado") {
+      const { error } = await sb.from("gastos_fijos").update({ activo: !f.activo }).eq("id", f.id);
+      if (error) return toast(traducirError(error), "error");
+      toast(f.activo ? "Gasto fijo desactivado" : "Gasto fijo activado"); recargar();
+    }
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar el gasto fijo "${f.nombre}"? Los gastos ya registrados no se borran.`)) return;
+      const { error } = await sb.from("gastos_fijos").delete().eq("id", f.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Gasto fijo eliminado"); recargar();
+    }
+  });
+}
+
+function formGastoFijo(f, proveedores, cuentas, alGuardar) {
+  const nuevo = !f;
+  abrirModal({
+    titulo: nuevo ? "Agregar gasto fijo" : "Editar gasto fijo",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Concepto *</label><input name="nombre" required placeholder="Nómina, internet, servicios…" value="${esc(f?.nombre ?? "")}"></div>
+        <div class="campo"><label>Monto mensual *</label><input type="number" step="1000" min="0" name="monto" required value="${f?.monto ?? ""}"></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "gasto_categoria", f?.categoria)}</div>
+        <div class="campo"><label>Día de pago</label><input type="number" min="1" max="28" name="dia_pago" value="${f?.dia_pago ?? 1}"></div>
+        <div class="campo"><label>Proveedor</label><select name="proveedor_id"><option value="">—</option>
+          ${proveedores.map((p) => `<option value="${p.id}" ${f?.proveedor_id === p.id ? "selected" : ""}>${esc(p.nombre)}</option>`).join("")}</select></div>
+        <div class="campo"><label>Sale de la cuenta</label><select name="cuenta_id"><option value="">—</option>
+          ${cuentas.map((c) => `<option value="${c.id}" ${f?.cuenta_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select></div>
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" value="${esc(f?.notas ?? "")}"></div>
+      <p class="ayuda">Esto no registra el gasto todavía: es la plantilla. Cada mes lo registras con el botón del panel.</p>`,
+    alGuardar: async (d) => {
+      const datos = {
+        nombre: d.nombre.trim(), monto: Number(d.monto) || 0, categoria: d.categoria || null,
+        dia_pago: Math.min(28, Math.max(1, Number(d.dia_pago) || 1)),
+        proveedor_id: d.proveedor_id ? Number(d.proveedor_id) : null,
+        cuenta_id: d.cuenta_id ? Number(d.cuenta_id) : null,
+        notas: d.notas.trim() || null
+      };
+      const { error } = nuevo ? await sb.from("gastos_fijos").insert(datos) : await sb.from("gastos_fijos").update(datos).eq("id", f.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Gasto fijo creado" : "Gasto fijo actualizado");
+      alGuardar();
+      return true;
+    }
+  });
 }
 
 // ---------- Arranque ----------

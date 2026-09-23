@@ -2182,7 +2182,7 @@ async function panelFacturas(cont) {
     });
     $("#t-fac", cont).innerHTML = !lista.length
       ? `<p class="vacio">No hay facturas en este mes.</p>`
-      : `<table><thead><tr><th>N°</th><th>Fecha</th><th>Cliente</th><th>Vehículo</th><th>Total</th><th>Saldo</th><th>Pago</th><th>Trabajo</th><th></th></tr></thead><tbody>
+      : `<table><thead><tr><th>N°</th><th>Fecha</th><th>Cliente</th><th>Vehículo</th><th>Total</th><th>Abonado</th><th>Saldo</th><th>Pago</th><th>Trabajo</th><th></th></tr></thead><tbody>
         ${lista.map((f) => {
           const pagado = pagadoDe(f.id), saldo = Number(f.total) - pagado;
           const v = vehiculos.find((x) => x.id === f.vehiculo_id);
@@ -2193,6 +2193,7 @@ async function panelFacturas(cont) {
             <td>${esc(nombreCli(f.cliente_id))}</td>
             <td>${esc(v ? [v.marca, v.referencia, v.placa].filter(Boolean).join(" ") : f.vehiculo || "—")}</td>
             <td><b>${pesos(f.total)}</b></td>
+            <td class="${pagado ? "texto-verde" : ""}">${pesos(pagado)}</td>
             <td class="${saldo > 0 ? "texto-alerta" : ""}">${pesos(saldo)}</td>
             <td><span class="chip ${est}">${f.estado_pago}</span></td>
             <td><span class="chip">${f.estado_trabajo.replace("_", " ")}</span></td>
@@ -2296,6 +2297,17 @@ function formDocumento(tipo, existente, datos, alGuardar) {
       </div>
 
       <div class="totales" id="totales"></div>
+      ${esFactura && !doc ? `<div class="panel-abono">
+        <h4 class="subtitulo">Abono inicial (para iniciar el trabajo)</h4>
+        <div class="rejilla">
+          <div class="campo"><label>Monto del abono</label><input type="number" step="1000" min="0" name="abono_inicial" placeholder="0"></div>
+          <div class="campo"><label>Entra a la cuenta</label><select name="abono_cuenta">
+            ${datos.cuentas.map((c) => `<option value="${c.id}" data-com="${c.comision_porcentaje || 0}">${esc(c.nombre)}${Number(c.comision_porcentaje) ? ` (−${c.comision_porcentaje}%)` : ""}</option>`).join("")}
+          </select></div>
+          <div class="campo"><label>Fecha del abono</label><input type="date" name="abono_fecha" value="${hoy}"></div>
+        </div>
+        <p class="ayuda" id="ayuda-abono">Déjalo en 0 si el cliente no abonó nada todavía.</p>
+      </div>` : ""}
       <div class="campo"><label>Notas</label><input name="notas" value="${esc(doc?.notas ?? "")}"></div>`,
     alGuardar: async (d, form) => {
       leerFilas(form);
@@ -2344,9 +2356,21 @@ function formDocumento(tipo, existente, datos, alGuardar) {
       const { error: e2 } = await sb.from(tablaItems).insert(filasGuardar);
       if (e2) { toast(traducirError(e2), "error"); return false; }
 
-      toast(doc ? "Documento actualizado" : (esFactura ? "Factura creada" : "Cotización creada"));
+      let abonoTexto = "";
+      const abono = Number(d.abono_inicial) || 0;
+      if (esFactura && !doc && abono > 0) {
+        const cuenta = datos.cuentas.find((c) => String(c.id) === d.abono_cuenta);
+        const comision = Math.round(abono * Number(cuenta?.comision_porcentaje || 0) / 100);
+        const { error: e3 } = await sb.from("pagos").insert({
+          factura_id: idDoc, cuenta_id: Number(d.abono_cuenta), monto: abono, comision,
+          tipo: "abono", fecha: d.abono_fecha || hoy, nota: "Abono inicial"
+        });
+        if (e3) toast("La factura se creó, pero el abono no se pudo registrar: " + traducirError(e3), "error");
+        else abonoTexto = ` · abono de ${pesos(abono)} registrado`;
+      }
+      toast((doc ? "Documento actualizado" : (esFactura ? "Factura creada" : "Cotización creada")) + abonoTexto);
       alGuardar();
-      if (esFactura && !doc) {
+      if (esFactura && !doc && !abono) {
         const f = { ...base, id: idDoc, estado_pago: "pendiente" };
         setTimeout(() => modalPagos(f, datos, alGuardar, items), 300);
       }
@@ -2402,6 +2426,7 @@ function formDocumento(tipo, existente, datos, alGuardar) {
     });
   }
 
+  let abonoTocado = false;
   function pintarTotales() {
     const d = Object.fromEntries(new FormData(form));
     const t = calcularTotales(filas, d.descuento, Number(d.iva_porcentaje) || 0, d.iva_incluido === "si");
@@ -2412,6 +2437,15 @@ function formDocumento(tipo, existente, datos, alGuardar) {
       ${t.iva ? `<div><span>IVA ${d.iva_porcentaje}% ${d.iva_incluido === "si" ? "(incluido)" : "(sumado)"}</span><b>${pesos(t.iva)}</b></div>` : ""}
       <div class="total-final"><span>Total</span><b>${pesos(t.total)}</b></div>
       ${sug.monto ? `<div class="sugerido"><span>Abono sugerido · ${esc(sug.texto)}</span><b>${pesos(sug.monto)}</b></div>` : ""}`;
+
+    const campoAbono = $("[name=abono_inicial]", form);
+    if (campoAbono && !abonoTocado) {
+      campoAbono.value = sug.monto || "";
+      const ayuda = $("#ayuda-abono", form);
+      if (ayuda) ayuda.innerHTML = sug.monto
+        ? `Sugerido para ${esc(sug.texto)}. Cámbialo si el cliente abonó otro valor, o ponlo en 0 si no abonó.`
+        : "Déjalo en 0 si el cliente no abonó nada todavía.";
+    }
   }
 
   function pintarFilas() {
@@ -2469,6 +2503,8 @@ function formDocumento(tipo, existente, datos, alGuardar) {
     filas.push({ descripcion: "", cantidad: 1, precio_unitario: 0, costo_unitario: 0 });
     pintarFilas();
   });
+  const campoAbonoInicial = $("[name=abono_inicial]", form);
+  if (campoAbonoInicial) campoAbonoInicial.addEventListener("input", () => { abonoTocado = true; });
   ["descuento", "iva_porcentaje", "iva_incluido"].forEach((n) => {
     $(`[name=${n}]`, form).addEventListener("input", pintarTotales);
     $(`[name=${n}]`, form).addEventListener("change", pintarTotales);

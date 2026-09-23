@@ -213,6 +213,9 @@ details[open] summary::after { content: " −"; }
 .aviso-panel { border-left: 5px solid var(--ambar); }
 @media (max-width: 900px) { .dos-columnas { grid-template-columns: 1fr; } }
 
+.panel-abono { border: 1px solid var(--rojo); border-radius: 6px; padding: 1rem; margin-top: 1.25rem; background: rgba(216,52,58,.07); }
+.panel-abono .subtitulo { margin-top: 0; }
+
 /* ---------- Celular ---------- */
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }

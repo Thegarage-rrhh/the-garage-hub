@@ -1,5 +1,5 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 6
+//  THE GARAGE HUB · Fase 8
 //  Empleados · Asistencia · Tareas · Inventarios · Clientes · Facturación
 // =====================================================
 
@@ -100,7 +100,7 @@ const MENU = {
       { id: "precios", label: "Precios", listo: true } ] },
     { grupo: "Dinero", items: [
       { id: "facturacion", label: "Facturación", listo: true },
-      { id: "contabilidad", label: "Contabilidad", fase: 8 },
+      { id: "contabilidad", label: "Contabilidad", listo: true },
       { id: "cuentas", label: "Cuentas de dinero", listo: true } ] }
   ],
   empleado: [
@@ -118,7 +118,7 @@ const MENU = {
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
   inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
-  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion };
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion, contabilidad: vistaContabilidad };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -2910,6 +2910,167 @@ function imprimirDocumento(tipo, doc, items, cliente, vehiculo, pagos) {
   if (!v) return toast("Tu navegador bloqueó la ventana. Permite las ventanas emergentes.", "error");
   v.document.write(html);
   v.document.close();
+}
+
+// =====================================================
+//  FASE 8 · CONTABILIDAD
+// =====================================================
+let mesContab = null;
+
+const NOMBRE_MES = (mes) => {
+  const [a, m] = mes.split("-").map(Number);
+  return new Date(a, m - 1, 1).toLocaleDateString("es-CO", { month: "long", year: "numeric" });
+};
+const mesAnterior = (mes) => {
+  const [a, m] = mes.split("-").map(Number);
+  const d = new Date(a, m - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+const porcentaje = (n) => `${(Number(n) || 0).toFixed(1)}%`;
+
+// Barras horizontales simples
+function barras(lista, formato = pesos) {
+  if (!lista.length) return `<p class="vacio">Sin datos este mes.</p>`;
+  const max = Math.max(...lista.map((x) => Math.abs(x.valor))) || 1;
+  return `<div class="barras">${lista.map((x) => `<div class="barra">
+    <div class="barra-cab"><span>${esc(x.nombre)}</span><b>${formato(x.valor)}</b></div>
+    <div class="barra-riel"><div class="barra-relleno ${x.clase || ""}" style="width:${Math.max(2, Math.abs(x.valor) / max * 100)}%"></div></div>
+    ${x.detalle ? `<span class="sub">${esc(x.detalle)}</span>` : ""}
+  </div>`).join("")}</div>`;
+}
+
+const variacion = (actual, previo) => {
+  if (!previo) return "";
+  const pct = (actual - previo) / Math.abs(previo) * 100;
+  const sube = pct >= 0;
+  return `<span class="chip ${sube ? "chip-ok" : "chip-alerta"}">${sube ? "▲" : "▼"} ${Math.abs(pct).toFixed(0)}% vs mes anterior</span>`;
+};
+
+async function vistaContabilidad(el) {
+  if (!mesContab) mesContab = mesActual();
+  const desde = mesContab + "-01", hasta = finDeMes(mesContab);
+  const mesPrev = mesAnterior(mesContab);
+
+  el.innerHTML = encabezado("Contabilidad", `Resumen de ${NOMBRE_MES(mesContab)}`,
+    `<div class="acciones"><input type="month" id="mes-cont" value="${mesContab}"></div>`) +
+    `<div id="cont-datos"><p class="vacio">Cargando…</p></div>`;
+  $("#mes-cont", el).addEventListener("change", (e) => { mesContab = e.target.value || mesActual(); vistaContabilidad(el); });
+
+  const [fac, ite, pag, gas, cue, prevFac, prevGas, todasFac, todosPag] = await Promise.all([
+    sb.from("facturas").select("*").gte("fecha", desde).lte("fecha", hasta),
+    sb.from("factura_items").select("*"),
+    sb.from("pagos").select("*").gte("fecha", desde).lte("fecha", hasta),
+    sb.from("gastos").select("*").gte("fecha", desde).lte("fecha", hasta),
+    sb.from("cuentas").select("*"),
+    sb.from("facturas").select("total,estado_pago,fecha").gte("fecha", mesPrev + "-01").lte("fecha", finDeMes(mesPrev)),
+    sb.from("gastos").select("monto").gte("fecha", mesPrev + "-01").lte("fecha", finDeMes(mesPrev)),
+    sb.from("facturas").select("id,total,estado_pago,fecha,cliente_id").neq("estado_pago", "anulada"),
+    sb.from("pagos").select("factura_id,monto")
+  ]);
+  const error = fac.error || pag.error || gas.error;
+  if (error) { $("#cont-datos", el).innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+
+  const facturas = (fac.data || []).filter((f) => f.estado_pago !== "anulada");
+  const ids = new Set(facturas.map((f) => f.id));
+  const items = (ite.data || []).filter((i) => ids.has(i.factura_id));
+  const pagos = pag.data || [], gastos = gas.data || [], cuentas = cue.data || [];
+
+  // ----- Totales del mes -----
+  const facturado = facturas.reduce((s, f) => s + Number(f.total), 0);
+  const recaudado = pagos.reduce((s, p) => s + Number(p.monto), 0);
+  const comisiones = pagos.reduce((s, p) => s + Number(p.comision), 0);
+  const recaudadoNeto = recaudado - comisiones;
+  const costoVentas = items.reduce((s, i) => s + Number(i.cantidad) * Number(i.costo_unitario || 0), 0);
+  const totalGastos = gastos.reduce((s, g) => s + Number(g.monto), 0);
+  const gananciaBruta = facturado - costoVentas;
+  const margen = facturado ? gananciaBruta / facturado * 100 : 0;
+  const flujo = recaudadoNeto - totalGastos;
+
+  const facturadoPrev = (prevFac.data || []).filter((f) => f.estado_pago !== "anulada").reduce((s, f) => s + Number(f.total), 0);
+  const gastosPrev = (prevGas.data || []).reduce((s, g) => s + Number(g.monto), 0);
+
+  const sinCosto = items.filter((i) => !Number(i.costo_unitario)).length;
+
+  // ----- Por servicio / producto -----
+  const porItem = {};
+  items.forEach((i) => {
+    const k = i.descripcion || "Sin descripción";
+    porItem[k] = porItem[k] || { nombre: k, venta: 0, costo: 0, unidades: 0 };
+    porItem[k].venta += Number(i.cantidad) * Number(i.precio_unitario);
+    porItem[k].costo += Number(i.cantidad) * Number(i.costo_unitario || 0);
+    porItem[k].unidades += Number(i.cantidad);
+  });
+  const lista = Object.values(porItem);
+  const topVentas = [...lista].sort((a, b) => b.venta - a.venta).slice(0, 6)
+    .map((x) => ({ nombre: x.nombre, valor: x.venta, detalle: `${x.unidades} vendido(s)` }));
+  const topGanancia = [...lista].map((x) => ({ ...x, ganancia: x.venta - x.costo }))
+    .sort((a, b) => b.ganancia - a.ganancia).slice(0, 6)
+    .map((x) => ({
+      nombre: x.nombre, valor: x.ganancia, clase: "verde",
+      detalle: x.venta ? `Margen ${porcentaje(x.ganancia / x.venta * 100)}${x.costo ? "" : " · falta costo"}` : ""
+    }));
+
+  // ----- Por categoría de gasto y por cuenta -----
+  const porGasto = {};
+  gastos.forEach((g) => { const k = g.categoria || "Sin categoría"; porGasto[k] = (porGasto[k] || 0) + Number(g.monto); });
+  const gastosCat = Object.entries(porGasto).sort((a, b) => b[1] - a[1])
+    .map(([nombre, valor]) => ({ nombre, valor, clase: "rojo" }));
+
+  const porCuenta = cuentas.map((c) => {
+    const entra = pagos.filter((p) => p.cuenta_id === c.id).reduce((s, p) => s + Number(p.monto) - Number(p.comision), 0);
+    const sale = gastos.filter((g) => g.cuenta_id === c.id).reduce((s, g) => s + Number(g.monto), 0);
+    return { nombre: c.nombre, entra, sale, neto: entra - sale };
+  }).filter((c) => c.entra || c.sale);
+
+  // ----- Cartera total (todas las facturas, no solo del mes) -----
+  const pagadoPorFactura = {};
+  (todosPag.data || []).forEach((p) => { pagadoPorFactura[p.factura_id] = (pagadoPorFactura[p.factura_id] || 0) + Number(p.monto); });
+  const cartera = (todasFac.data || []).reduce((s, f) => s + Math.max(0, Number(f.total) - (pagadoPorFactura[f.id] || 0)), 0);
+
+  $("#cont-datos", el).innerHTML = `
+    <div class="cifras">
+      <div class="cifra"><b>${pesos(facturado)}</b><span>Ventas del mes ${variacion(facturado, facturadoPrev)}</span></div>
+      <div class="cifra"><b>${pesos(costoVentas)}</b><span>Costo de lo vendido</span></div>
+      <div class="cifra"><b>${pesos(gananciaBruta)}</b><span>Ganancia bruta · margen ${porcentaje(margen)}</span></div>
+      <div class="cifra ${totalGastos > recaudadoNeto ? "cifra-alerta" : ""}"><b>${pesos(totalGastos)}</b><span>Gastos del mes ${variacion(totalGastos, gastosPrev)}</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Flujo de caja del mes</h2>
+      <div class="flujo">
+        <div><span>Dinero recibido</span><b>${pesos(recaudado)}</b></div>
+        <div><span>Comisiones de datáfono y otros</span><b class="texto-alerta">− ${pesos(comisiones)}</b></div>
+        <div><span>Recibido neto</span><b>${pesos(recaudadoNeto)}</b></div>
+        <div><span>Gastos pagados</span><b class="texto-alerta">− ${pesos(totalGastos)}</b></div>
+        <div class="total-final"><span>Resultado del mes</span><b class="${flujo >= 0 ? "texto-verde" : "texto-alerta"}">${pesos(flujo)}</b></div>
+      </div>
+      <p class="ayuda">Esto es dinero que entró y salió de verdad. La ganancia bruta de arriba es contable: cuenta todo lo facturado, esté cobrado o no.</p>
+    </div>
+
+    <div class="cifras">
+      <div class="cifra ${cartera > 0 ? "cifra-alerta" : ""}"><b>${pesos(cartera)}</b><span>Por cobrar acumulado (todas las facturas)</span></div>
+      <div class="cifra"><b>${facturas.length}</b><span>Facturas emitidas</span></div>
+      <div class="cifra"><b>${pesos(facturas.length ? facturado / facturas.length : 0)}</b><span>Venta promedio por factura</span></div>
+    </div>
+
+    ${sinCosto ? `<div class="panel aviso-panel"><b>Faltan costos.</b> ${sinCosto} línea(s) facturada(s) este mes no tienen costo registrado, así que la ganancia real es menor a la que ves. Puedes cargar los costos en <b>Precios</b>, en el campo "Costo estimado".</div>` : ""}
+
+    <div class="dos-columnas">
+      <div class="panel"><h2>Lo que más vende</h2>${barras(topVentas)}</div>
+      <div class="panel"><h2>Lo que más ganancia deja</h2>${barras(topGanancia)}</div>
+    </div>
+
+    <div class="dos-columnas">
+      <div class="panel"><h2>Gastos por categoría</h2>${barras(gastosCat)}</div>
+      <div class="panel"><h2>Movimiento por cuenta</h2>
+        ${porCuenta.length ? `<div class="tabla-wrap"><table>
+          <thead><tr><th>Cuenta</th><th>Entró (neto)</th><th>Salió</th><th>Balance</th></tr></thead>
+          <tbody>${porCuenta.map((c) => `<tr><td><b>${esc(c.nombre)}</b></td>
+            <td>${pesos(c.entra)}</td><td class="texto-alerta">${pesos(c.sale)}</td>
+            <td><b class="${c.neto >= 0 ? "texto-verde" : "texto-alerta"}">${pesos(c.neto)}</b></td></tr>`).join("")}</tbody>
+        </table></div>` : `<p class="vacio">Sin movimientos este mes.</p>`}
+      </div>
+    </div>`;
 }
 
 // ---------- Arranque ----------

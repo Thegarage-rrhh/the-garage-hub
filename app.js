@@ -85,7 +85,7 @@ function abrirModal({ titulo, cuerpo, botonTexto = "Guardar", alGuardar, sinPie 
 // listo: true = ya funciona · fase = en qué fase llega
 const MENU = {
   admin: [
-    { grupo: "General", items: [{ id: "inicio", label: "Inicio", listo: true }] },
+    { grupo: "General", items: [{ id: "inicio", label: "Inicio", listo: true }, { id: "cuenta", label: "Mi cuenta", listo: true }] },
     { grupo: "Equipo", items: [
       { id: "empleados", label: "Empleados", listo: true },
       { id: "asistencia", label: "Asistencia", listo: true },
@@ -111,13 +111,14 @@ const MENU = {
     { grupo: "Consultas", items: [
       { id: "inventario", label: "Inventario", listo: true },
       { id: "moldes", label: "Moldes", listo: true },
-      { id: "precios", label: "Precios", listo: true } ] }
+      { id: "precios", label: "Precios", listo: true },
+      { id: "cuenta", label: "Mi cuenta", listo: true } ] }
   ]
 };
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
   inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
-  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios };
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -288,6 +289,7 @@ async function pintarEmpleados() {
       <td><div class="acciones">
         <button class="btn btn-chico" data-acc="novedades" data-id="${p.id}">Novedades</button>
         <button class="btn btn-chico" data-acc="editar" data-id="${p.id}">Editar</button>
+        <button class="btn btn-chico" data-acc="clave" data-id="${p.id}">Contraseña</button>
         <button class="btn btn-chico" data-acc="acceso" data-id="${p.id}" ${p.id === perfil.id ? "disabled title='No puedes quitarte el acceso a ti mismo'" : ""}>
           ${p.activo ? "Quitar acceso" : "Dar acceso"}</button>
       </div></td></tr>`).join("")}
@@ -299,6 +301,7 @@ async function pintarEmpleados() {
     const p = data.find((x) => x.id === b.dataset.id);
     if (b.dataset.acc === "editar") formEmpleado(p);
     if (b.dataset.acc === "novedades") modalNovedades(p);
+    if (b.dataset.acc === "clave") modalRestablecer(p);
     if (b.dataset.acc === "acceso") {
       const accion = p.activo ? "quitarle el acceso" : "darle acceso";
       if (!confirm(`¿Seguro que quieres ${accion} a ${p.nombre || p.email}?`)) return;
@@ -1977,6 +1980,77 @@ function modalPreciosVehiculo(s, tipos, actuales, alGuardar) {
       }
       toast("Precios guardados");
       alGuardar();
+      return true;
+    }
+  });
+}
+
+// =====================================================
+//  CUENTA · Cambiar mi contraseña y restablecer la de otros
+// =====================================================
+async function vistaCuenta(el) {
+  el.innerHTML = encabezado("Mi cuenta", "Tus datos de acceso al HUB.") +
+    `<div class="panel">
+      <h2>Mis datos</h2>
+      <div class="chips">
+        <span class="chip">${esc(perfil.nombre || "Sin nombre")}</span>
+        <span class="chip">${esc(perfil.email || "")}</span>
+        <span class="chip ${perfil.rol === "admin" ? "chip-alerta fuerte" : ""}">${perfil.rol === "admin" ? "Administrador" : esc(perfil.cargo || "Empleado")}</span>
+      </div>
+      <p class="ayuda" style="margin-top:1rem">Si necesitas cambiar tu nombre o tu cargo, pídeselo a un administrador.</p>
+    </div>
+    <div class="panel">
+      <h2>Cambiar mi contraseña</h2>
+      <form id="form-pass">
+        <div class="rejilla">
+          <div class="campo"><label>Contraseña actual *</label><input type="password" name="actual" required autocomplete="current-password"></div>
+          <div class="campo"><label>Nueva contraseña *</label><input type="password" name="nueva" minlength="6" required autocomplete="new-password"></div>
+          <div class="campo"><label>Repite la nueva *</label><input type="password" name="repetir" minlength="6" required autocomplete="new-password"></div>
+        </div>
+        <p class="ayuda">Mínimo 6 caracteres. Anótala en un lugar seguro.</p>
+        <button class="btn btn-rojo" type="submit">Guardar contraseña</button>
+      </form>
+    </div>`;
+
+  $("#form-pass", el).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(e.target));
+    if (d.nueva !== d.repetir) return toast("Las contraseñas nuevas no coinciden.", "error");
+    const btn = $("button", e.target);
+    btn.disabled = true;
+
+    // Se verifica la contraseña actual con el cliente secundario para no perder la sesión
+    const prueba = await sbAlta.auth.signInWithPassword({ email: perfil.email, password: d.actual });
+    if (prueba.error) { btn.disabled = false; return toast("La contraseña actual no es correcta.", "error"); }
+    await sbAlta.auth.signOut();
+
+    const { error } = await sb.auth.updateUser({ password: d.nueva });
+    btn.disabled = false;
+    if (error) return toast(traducirError(error), "error");
+    e.target.reset();
+    toast("Contraseña actualizada. Úsala la próxima vez que entres.");
+  });
+}
+
+// Restablecer la contraseña de un empleado (solo administradores)
+function modalRestablecer(p) {
+  abrirModal({
+    titulo: `Restablecer contraseña · ${p.nombre || p.email}`,
+    botonTexto: "Cambiar contraseña",
+    cuerpo: `<p class="ayuda">Escribe una contraseña temporal y entrégasela al empleado. Él la puede cambiar después desde <b>Mi cuenta</b>.</p>
+      <div class="campo"><label>Nueva contraseña *</label><input name="password" type="text" minlength="6" required placeholder="Mínimo 6 caracteres"></div>`,
+    alGuardar: async (d) => {
+      const { data, error } = await sb.functions.invoke("admin-reset-password", {
+        body: { usuario_id: p.id, password: d.password }
+      });
+      if (error || data?.error) {
+        const detalle = data?.error || error?.message || "";
+        toast(detalle.includes("Failed") || detalle.includes("not found") || detalle.includes("404")
+          ? "Falta instalar la función 'admin-reset-password' en Supabase."
+          : `No se pudo cambiar: ${detalle}`, "error");
+        return false;
+      }
+      toast("Contraseña cambiada. Entrégasela al empleado.");
       return true;
     }
   });

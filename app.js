@@ -1,6 +1,6 @@
 // =====================================================
-//  THE GARAGE HUB · Fase 5
-//  Empleados · Asistencia · Tareas · Inventarios · Clientes · Precios
+//  THE GARAGE HUB · Fase 6
+//  Empleados · Asistencia · Tareas · Inventarios · Clientes · Facturación
 // =====================================================
 
 const root = document.getElementById("root");
@@ -51,10 +51,10 @@ function traducirError(error) {
   return "Ocurrió un error: " + m;
 }
 
-function abrirModal({ titulo, cuerpo, botonTexto = "Guardar", alGuardar, sinPie = false }) {
+function abrirModal({ titulo, cuerpo, botonTexto = "Guardar", alGuardar, sinPie = false, ancho = false }) {
   const fondo = document.createElement("div");
   fondo.className = "fondo-modal";
-  fondo.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(titulo)}">
+  fondo.innerHTML = `<div class="modal ${ancho ? "modal-ancho" : ""}" role="dialog" aria-modal="true" aria-label="${esc(titulo)}">
     <header><h3>${esc(titulo)}</h3><button class="btn btn-texto" data-cerrar aria-label="Cerrar">✕</button></header>
     <form class="cuerpo">${cuerpo}</form>
     ${sinPie ? "" : `<footer><button class="btn btn-texto" data-cerrar type="button">Cancelar</button>
@@ -99,7 +99,7 @@ const MENU = {
       { id: "proveedores", label: "Proveedores", listo: true },
       { id: "precios", label: "Precios", listo: true } ] },
     { grupo: "Dinero", items: [
-      { id: "facturacion", label: "Facturación", fase: 6 },
+      { id: "facturacion", label: "Facturación", listo: true },
       { id: "contabilidad", label: "Contabilidad", fase: 8 },
       { id: "cuentas", label: "Cuentas de dinero", listo: true } ] }
   ],
@@ -118,7 +118,7 @@ const MENU = {
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
   inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
-  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta };
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -2054,6 +2054,862 @@ function modalRestablecer(p) {
       return true;
     }
   });
+}
+
+// =====================================================
+//  FASE 6 · FACTURACIÓN
+// =====================================================
+let tabFactura = "facturas";
+let mesFactura = null;
+let ajustesCache = null;
+
+const mesActual = () => hoyISO().slice(0, 7);
+const numeroDoc = (prefijo, id) => `${prefijo}-${String(id).padStart(4, "0")}`;
+const finDeMes = (mes) => { const [a, m] = mes.split("-").map(Number); return new Date(a, m, 0).toLocaleDateString("en-CA"); };
+
+async function cargarAjustes(forzar = false) {
+  if (!ajustesCache || forzar) {
+    const { data } = await sb.from("ajustes").select("*").maybeSingle();
+    ajustesCache = data || { iva_porcentaje: 19, iva_incluido: true, dias_validez_cotizacion: 180, prefijo_factura: "TG" };
+  }
+  return ajustesCache;
+}
+
+// Calcula subtotal, IVA y total de un documento
+function calcularTotales(items, descuento, ivaPorcentaje, ivaIncluido) {
+  const subtotal = items.reduce((s, i) => s + Number(i.cantidad || 0) * Number(i.precio_unitario || 0), 0);
+  const base = Math.max(0, subtotal - Number(descuento || 0));
+  let iva = 0, total = base;
+  if (Number(ivaPorcentaje) > 0) {
+    if (ivaIncluido) { iva = base - base / (1 + Number(ivaPorcentaje) / 100); }
+    else { iva = base * Number(ivaPorcentaje) / 100; total = base + iva; }
+  }
+  return { subtotal, base, iva: Math.round(iva), total: Math.round(total) };
+}
+
+// Abono sugerido según la categoría con mayor peso en el documento
+function abonoSugerido(items, total, reglas) {
+  const porCat = {};
+  items.forEach((i) => { porCat[i.categoria || "Otros"] = (porCat[i.categoria || "Otros"] || 0) + Number(i.cantidad || 0) * Number(i.precio_unitario || 0); });
+  const principal = Object.entries(porCat).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const regla = reglas.find((r) => r.categoria === principal);
+  if (!regla) return { monto: 0, texto: "" };
+  const monto = Number(regla.monto_fijo) > 0 ? Number(regla.monto_fijo) : Math.round(total * Number(regla.porcentaje) / 100);
+  return { monto, texto: `${principal}: ${Number(regla.monto_fijo) > 0 ? pesos(regla.monto_fijo) : Number(regla.porcentaje) + "%"}` };
+}
+
+// ---------- Vista principal ----------
+async function vistaFacturacion(el) {
+  await Promise.all([cargarOpciones(), cargarAjustes()]);
+  if (!mesFactura) mesFactura = mesActual();
+  const pestanas = [["facturas", "Facturas"], ["gastos", "Gastos"], ["cotizaciones", "Cotizaciones"], ["config", "Configuración"]];
+  el.innerHTML = encabezado("Facturación", "Facturas de venta, gastos y cotizaciones.") +
+    `<div class="pestanas">${pestanas.map(([id, t]) => `<button class="pestana ${tabFactura === id ? "activa" : ""}" data-tab="${id}">${t}</button>`).join("")}</div>
+     <div id="panel-fact"></div>`;
+  $(".pestanas", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    tabFactura = b.dataset.tab;
+    vistaFacturacion(el);
+  });
+  const cont = $("#panel-fact", el);
+  if (tabFactura === "facturas") panelFacturas(cont);
+  if (tabFactura === "gastos") panelGastos(cont);
+  if (tabFactura === "cotizaciones") panelCotizaciones(cont);
+  if (tabFactura === "config") panelConfigFactura(cont);
+}
+
+// ---------- Datos compartidos por los formularios ----------
+async function datosDocumento() {
+  const [cli, veh, cat, pv, cue, ab] = await Promise.all([
+    sb.from("clientes").select("id,nombre,telefono").order("nombre"),
+    sb.from("vehiculos").select("*"),
+    sb.from("catalogo").select("*").eq("activo", true).order("nombre"),
+    sb.from("precios_vehiculo").select("*"),
+    sb.from("cuentas").select("*").eq("activa", true).order("nombre"),
+    sb.from("abonos_sugeridos").select("*")
+  ]);
+  return {
+    clientes: cli.data || [], vehiculos: veh.data || [], catalogo: cat.data || [],
+    precios: pv.data || [], cuentas: cue.data || [], reglas: ab.data || []
+  };
+}
+
+// ---------- Panel: Facturas ----------
+async function panelFacturas(cont) {
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const desde = mesFactura + "-01", hasta = finDeMes(mesFactura);
+  const [fac, ite, pag, cli, veh] = await Promise.all([
+    sb.from("facturas").select("*").gte("fecha", desde).lte("fecha", hasta).order("id", { ascending: false }),
+    sb.from("factura_items").select("*"),
+    sb.from("pagos").select("*"),
+    sb.from("clientes").select("id,nombre,telefono,documento,tipo_documento,email,direccion,ciudad"),
+    sb.from("vehiculos").select("*")
+  ]);
+  if (fac.error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(fac.error))}</p></div>`; return; }
+  const facturas = fac.data, items = ite.data || [], pagos = pag.data || [];
+  const clientes = cli.data || [], vehiculos = veh.data || [];
+  const recargar = () => panelFacturas(cont);
+  const pagadoDe = (id) => pagos.filter((p) => p.factura_id === id).reduce((s, p) => s + Number(p.monto), 0);
+  const nombreCli = (id) => clientes.find((c) => c.id === id)?.nombre || "Sin cliente";
+
+  const totalMes = facturas.filter((f) => f.estado_pago !== "anulada").reduce((s, f) => s + Number(f.total), 0);
+  const recaudado = facturas.filter((f) => f.estado_pago !== "anulada").reduce((s, f) => s + pagadoDe(f.id), 0);
+
+  cont.innerHTML = `
+    <div class="cifras">
+      <div class="cifra"><b>${facturas.length}</b><span>Facturas del mes</span></div>
+      <div class="cifra"><b>${pesos(totalMes)}</b><span>Facturado</span></div>
+      <div class="cifra"><b>${pesos(recaudado)}</b><span>Recibido</span></div>
+      <div class="cifra ${totalMes - recaudado > 0 ? "cifra-alerta" : ""}"><b>${pesos(totalMes - recaudado)}</b><span>Por cobrar</span></div>
+    </div>
+    <div class="panel">
+      ${barraBusqueda("q-fac", "Buscar por número, cliente o placa…",
+        `<input type="month" id="mes-fac" value="${mesFactura}">
+         <select id="f-estado"><option value="">Todos los estados</option>
+           <option value="pendiente">Pendiente</option><option value="abonada">Abonada</option>
+           <option value="pagada">Pagada</option><option value="anulada">Anulada</option></select>`,
+        `<button class="btn btn-rojo" id="nueva-fac">+ Nueva factura</button>`)}
+      <div class="tabla-wrap" id="t-fac"></div>
+    </div>`;
+
+  const pintar = () => {
+    const q = $("#q-fac", cont).value, est = $("#f-estado", cont).value;
+    const lista = facturas.filter((f) => {
+      const v = vehiculos.find((x) => x.id === f.vehiculo_id);
+      const texto = [numeroDoc(ajustesCache.prefijo_factura, f.id), nombreCli(f.cliente_id), f.placa, v?.placa, v?.marca, v?.referencia, f.numero_dian].filter(Boolean).join(" ");
+      return coincide(texto, q) && (!est || f.estado_pago === est);
+    });
+    $("#t-fac", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay facturas en este mes.</p>`
+      : `<table><thead><tr><th>N°</th><th>Fecha</th><th>Cliente</th><th>Vehículo</th><th>Total</th><th>Saldo</th><th>Pago</th><th>Trabajo</th><th></th></tr></thead><tbody>
+        ${lista.map((f) => {
+          const pagado = pagadoDe(f.id), saldo = Number(f.total) - pagado;
+          const v = vehiculos.find((x) => x.id === f.vehiculo_id);
+          const est = { pendiente: "chip-alerta", abonada: "chip-aviso", pagada: "chip-ok", anulada: "" }[f.estado_pago];
+          return `<tr class="${f.estado_pago === "anulada" ? "fila-futura" : ""}">
+            <td><b>${numeroDoc(ajustesCache.prefijo_factura, f.id)}</b>${f.numero_dian ? `<span class="sub">DIAN ${esc(f.numero_dian)}</span>` : ""}</td>
+            <td>${fechaCorta(f.fecha)}${f.fecha_entrega ? `<span class="sub">Entrega ${fechaCorta(f.fecha_entrega)}</span>` : ""}</td>
+            <td>${esc(nombreCli(f.cliente_id))}</td>
+            <td>${esc(v ? [v.marca, v.referencia, v.placa].filter(Boolean).join(" ") : f.vehiculo || "—")}</td>
+            <td><b>${pesos(f.total)}</b></td>
+            <td class="${saldo > 0 ? "texto-alerta" : ""}">${pesos(saldo)}</td>
+            <td><span class="chip ${est}">${f.estado_pago}</span></td>
+            <td><span class="chip">${f.estado_trabajo.replace("_", " ")}</span></td>
+            <td><div class="acciones">
+              <button class="btn btn-chico btn-rojo" data-acc="pagos|${f.id}">Pagos</button>
+              <button class="btn btn-chico" data-acc="imprimir|${f.id}">Imprimir</button>
+              <button class="btn btn-chico" data-acc="editar|${f.id}">Editar</button>
+              <button class="btn btn-chico btn-texto" data-acc="anular|${f.id}">${f.estado_pago === "anulada" ? "Eliminar" : "Anular"}</button>
+            </div></td></tr>`;
+        }).join("")}
+      </tbody></table>`;
+  };
+  pintar();
+
+  $("#q-fac", cont).addEventListener("input", pintar);
+  $("#f-estado", cont).addEventListener("change", pintar);
+  $("#mes-fac", cont).addEventListener("change", (e) => { mesFactura = e.target.value || mesActual(); panelFacturas(cont); });
+  $("#nueva-fac", cont).addEventListener("click", async () => formDocumento("factura", null, await datosDocumento(), recargar));
+  $("#t-fac", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const f = facturas.find((x) => String(x.id) === id);
+    const misItems = items.filter((x) => x.factura_id === f.id);
+    if (accion === "editar") formDocumento("factura", { doc: f, items: misItems }, await datosDocumento(), recargar);
+    if (accion === "pagos") modalPagos(f, await datosDocumento(), recargar);
+    if (accion === "imprimir") imprimirDocumento("factura", f, misItems, clientes.find((c) => c.id === f.cliente_id), vehiculos.find((v) => v.id === f.vehiculo_id), pagos.filter((p) => p.factura_id === f.id));
+    if (accion === "anular") {
+      if (f.estado_pago === "anulada") {
+        if (!confirm("¿Eliminar definitivamente esta factura anulada?")) return;
+        const { error } = await sb.from("facturas").delete().eq("id", f.id);
+        if (error) return toast(traducirError(error), "error");
+        toast("Factura eliminada");
+      } else {
+        if (!confirm(`¿Anular la factura ${numeroDoc(ajustesCache.prefijo_factura, f.id)}? Queda en el historial pero no cuenta en los totales.`)) return;
+        const { error } = await sb.from("facturas").update({ estado_pago: "anulada" }).eq("id", f.id);
+        if (error) return toast(traducirError(error), "error");
+        toast("Factura anulada");
+      }
+      recargar();
+    }
+  });
+}
+
+// ---------- Formulario de factura / cotización ----------
+function formDocumento(tipo, existente, datos, alGuardar) {
+  const esFactura = tipo === "factura";
+  const doc = existente?.doc || null;
+  const aj = ajustesCache;
+  let filas = (existente?.items || []).map((i) => ({
+    catalogo_id: i.catalogo_id, descripcion: i.descripcion, categoria: i.categoria,
+    cantidad: Number(i.cantidad), precio_unitario: Number(i.precio_unitario), costo_unitario: Number(i.costo_unitario || 0)
+  }));
+  if (!filas.length) filas = [{ descripcion: "", cantidad: 1, precio_unitario: 0, costo_unitario: 0 }];
+
+  const hoy = hoyISO();
+  const validaHasta = sumarDias(hoy, aj.dias_validez_cotizacion);
+
+  const { fondo, form } = abrirModal({
+    titulo: esFactura ? (doc ? `Editar factura ${numeroDoc(aj.prefijo_factura, doc.id)}` : "Nueva factura") : (doc ? `Editar cotización COT-${String(doc.id).padStart(4, "0")}` : "Nueva cotización"),
+    botonTexto: doc ? "Guardar cambios" : (esFactura ? "Crear factura" : "Crear cotización"),
+    ancho: true,
+    cuerpo: `
+      <div class="rejilla">
+        <div class="campo"><label>Cliente *</label><select name="cliente_id" required>
+          <option value="">Selecciona…</option>
+          ${datos.clientes.map((c) => `<option value="${c.id}" ${doc?.cliente_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}
+        </select></div>
+        <div class="campo"><label>Vehículo</label><select name="vehiculo_id"><option value="">—</option></select></div>
+        <div class="campo"><label>Tipo de vehículo</label>${selectOps("tipo_vehiculo", "tipo_vehiculo", doc?.tipo_vehiculo ?? "Automóvil")}</div>
+        <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${doc?.fecha ?? hoy}"></div>
+        ${esFactura
+          ? `<div class="campo"><label>Fecha de entrega</label><input type="date" name="fecha_entrega" value="${doc?.fecha_entrega ?? ""}"></div>
+             <div class="campo"><label>Estado del trabajo</label><select name="estado_trabajo">
+               ${["recibido", "en_proceso", "listo", "entregado"].map((x) => `<option value="${x}" ${doc?.estado_trabajo === x ? "selected" : ""}>${x.replace("_", " ")}</option>`).join("")}
+             </select></div>`
+          : `<div class="campo"><label>Válida hasta</label><input type="date" name="valida_hasta" value="${doc?.valida_hasta ?? validaHasta}"></div>
+             <div class="campo"><label>Estado</label><select name="estado">
+               ${["borrador", "enviada", "aceptada", "rechazada"].map((x) => `<option ${doc?.estado === x ? "selected" : ""}>${x}</option>`).join("")}
+             </select></div>`}
+      </div>
+
+      <h4 class="subtitulo">Servicios y productos</h4>
+      <div class="tabla-wrap"><table class="tabla-items">
+        <thead><tr><th>Descripción</th><th>Cant.</th><th>Precio</th><th>Costo</th><th>Subtotal</th><th></th></tr></thead>
+        <tbody id="filas-items"></tbody>
+      </table></div>
+      <div style="margin:.5rem 0 1rem"><button class="btn btn-chico" type="button" id="add-fila">+ Agregar línea</button></div>
+
+      <div class="rejilla">
+        <div class="campo"><label>Descuento</label><input type="number" step="1" min="0" name="descuento" value="${doc?.descuento ?? 0}"></div>
+        <div class="campo"><label>IVA</label><select name="iva_porcentaje">
+          <option value="0" ${!doc || Number(doc.iva_porcentaje) === 0 ? "selected" : ""}>Sin IVA</option>
+          <option value="${aj.iva_porcentaje}" ${doc && Number(doc.iva_porcentaje) > 0 ? "selected" : ""}>IVA ${aj.iva_porcentaje}%</option>
+        </select></div>
+        <div class="campo"><label>El precio…</label><select name="iva_incluido">
+          <option value="si" ${(doc ? doc.iva_incluido : aj.iva_incluido) ? "selected" : ""}>ya incluye IVA</option>
+          <option value="no" ${(doc ? !doc.iva_incluido : !aj.iva_incluido) ? "selected" : ""}>+ IVA aparte</option>
+        </select></div>
+        ${esFactura ? `<div class="campo"><label>N° factura electrónica (DIAN)</label><input name="numero_dian" value="${esc(doc?.numero_dian ?? "")}"></div>` : ""}
+      </div>
+
+      <div class="totales" id="totales"></div>
+      <div class="campo"><label>Notas</label><input name="notas" value="${esc(doc?.notas ?? "")}"></div>`,
+    alGuardar: async (d, form) => {
+      leerFilas(form);
+      const items = filas.filter((f) => f.descripcion && Number(f.cantidad) > 0);
+      if (!items.length) { toast("Agrega al menos una línea con descripción.", "error"); return false; }
+      const ivaP = Number(d.iva_porcentaje) || 0, ivaInc = d.iva_incluido === "si";
+      const t = calcularTotales(items, d.descuento, ivaP, ivaInc);
+
+      const base = {
+        cliente_id: Number(d.cliente_id), vehiculo_id: d.vehiculo_id ? Number(d.vehiculo_id) : null,
+        tipo_vehiculo: d.tipo_vehiculo || null, fecha: d.fecha || hoy,
+        subtotal: t.subtotal, descuento: Number(d.descuento) || 0,
+        iva_porcentaje: ivaP, iva_incluido: ivaInc, iva_valor: t.iva, total: t.total,
+        notas: d.notas.trim() || null
+      };
+      if (esFactura) {
+        base.fecha_entrega = d.fecha_entrega || null;
+        base.estado_trabajo = d.estado_trabajo;
+        base.numero_dian = d.numero_dian?.trim() || null;
+        base.requiere_fe = !!d.numero_dian?.trim();
+      } else {
+        base.valida_hasta = d.valida_hasta || null;
+        base.estado = d.estado;
+      }
+
+      const tablaDoc = esFactura ? "facturas" : "cotizaciones";
+      const tablaItems = esFactura ? "factura_items" : "cotizacion_items";
+      const llave = esFactura ? "factura_id" : "cotizacion_id";
+
+      let idDoc = doc?.id;
+      if (doc) {
+        const { error } = await sb.from(tablaDoc).update(base).eq("id", doc.id);
+        if (error) { toast(traducirError(error), "error"); return false; }
+        await sb.from(tablaItems).delete().eq(llave, doc.id);
+      } else {
+        const { data, error } = await sb.from(tablaDoc).insert(base).select("id").single();
+        if (error) { toast(traducirError(error), "error"); return false; }
+        idDoc = data.id;
+      }
+
+      const filasGuardar = items.map((i) => ({
+        [llave]: idDoc, catalogo_id: i.catalogo_id || null, descripcion: i.descripcion,
+        categoria: i.categoria || null, cantidad: i.cantidad,
+        precio_unitario: i.precio_unitario, costo_unitario: i.costo_unitario || 0
+      }));
+      const { error: e2 } = await sb.from(tablaItems).insert(filasGuardar);
+      if (e2) { toast(traducirError(e2), "error"); return false; }
+
+      toast(doc ? "Documento actualizado" : (esFactura ? "Factura creada" : "Cotización creada"));
+      alGuardar();
+      if (esFactura && !doc) {
+        const f = { ...base, id: idDoc, estado_pago: "pendiente" };
+        setTimeout(() => modalPagos(f, datos, alGuardar, items), 300);
+      }
+      return true;
+    }
+  });
+
+  // ----- Vehículos según el cliente -----
+  const selCliente = $("[name=cliente_id]", form), selVeh = $("[name=vehiculo_id]", form);
+  const pintarVehiculos = () => {
+    const id = Number(selCliente.value);
+    const autos = datos.vehiculos.filter((v) => v.cliente_id === id);
+    selVeh.innerHTML = `<option value="">—</option>` + autos.map((v) =>
+      `<option value="${v.id}" data-tipo="${esc(v.tipo || "")}" ${doc?.vehiculo_id === v.id ? "selected" : ""}>${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</option>`).join("");
+  };
+  pintarVehiculos();
+  selCliente.addEventListener("change", pintarVehiculos);
+  selVeh.addEventListener("change", () => {
+    const tipo = selVeh.selectedOptions[0]?.dataset.tipo;
+    if (tipo) { $("[name=tipo_vehiculo]", form).value = tipo; pintarFilas(); }
+  });
+  $("[name=tipo_vehiculo]", form).addEventListener("change", () => {
+    leerFilas();
+    const tipoVeh = $("[name=tipo_vehiculo]", form).value;
+    filas.forEach((f, i) => {
+      if (!f.catalogo_id) return;
+      const p = precioPara(f.catalogo_id, tipoVeh);
+      filas[i].precio_unitario = p.precio;
+      filas[i].costo_unitario = p.costo;
+    });
+    pintarFilas();
+  });
+
+  // ----- Líneas del documento -----
+  function precioPara(catalogoId, tipoVehiculo) {
+    const s = datos.catalogo.find((c) => c.id === catalogoId);
+    if (!s) return { precio: 0, costo: 0, categoria: null, nombre: "" };
+    const pv = datos.precios.find((p) => p.catalogo_id === catalogoId && p.tipo_vehiculo === tipoVehiculo);
+    return {
+      precio: pv && Number(pv.precio) ? Number(pv.precio) : Number(s.precio),
+      costo: pv && Number(pv.costo_estimado) ? Number(pv.costo_estimado) : Number(s.costo_estimado),
+      categoria: s.categoria, nombre: s.nombre
+    };
+  }
+
+  function leerFilas(f = form) {
+    [...f.querySelectorAll("tr[data-fila]")].forEach((tr, i) => {
+      if (!filas[i]) return;
+      filas[i].descripcion = $("[name=descripcion]", tr).value.trim();
+      filas[i].cantidad = Number($("[name=cantidad]", tr).value) || 0;
+      filas[i].precio_unitario = Number($("[name=precio]", tr).value) || 0;
+      filas[i].costo_unitario = Number($("[name=costo]", tr).value) || 0;
+    });
+  }
+
+  function pintarTotales() {
+    const d = Object.fromEntries(new FormData(form));
+    const t = calcularTotales(filas, d.descuento, Number(d.iva_porcentaje) || 0, d.iva_incluido === "si");
+    const sug = esFactura ? abonoSugerido(filas, t.total, datos.reglas) : { monto: 0, texto: "" };
+    $("#totales", form).innerHTML = `
+      <div><span>Subtotal</span><b>${pesos(t.subtotal)}</b></div>
+      ${Number(d.descuento) ? `<div><span>Descuento</span><b>− ${pesos(d.descuento)}</b></div>` : ""}
+      ${t.iva ? `<div><span>IVA ${d.iva_porcentaje}% ${d.iva_incluido === "si" ? "(incluido)" : "(sumado)"}</span><b>${pesos(t.iva)}</b></div>` : ""}
+      <div class="total-final"><span>Total</span><b>${pesos(t.total)}</b></div>
+      ${sug.monto ? `<div class="sugerido"><span>Abono sugerido · ${esc(sug.texto)}</span><b>${pesos(sug.monto)}</b></div>` : ""}`;
+  }
+
+  function pintarFilas() {
+    const tipoVeh = $("[name=tipo_vehiculo]", form).value;
+    $("#filas-items", form).innerHTML = filas.map((f, i) => `<tr data-fila="${i}">
+      <td>
+        <select class="sel-cat" data-i="${i}">
+          <option value="">Escribir manualmente…</option>
+          ${datos.catalogo.map((c) => `<option value="${c.id}" ${f.catalogo_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}
+        </select>
+        <input name="descripcion" value="${esc(f.descripcion || "")}" placeholder="Descripción">
+      </td>
+      <td><input type="number" step="0.5" min="0" name="cantidad" value="${f.cantidad}"></td>
+      <td><input type="number" step="1" min="0" name="precio" value="${f.precio_unitario}"></td>
+      <td><input type="number" step="1" min="0" name="costo" value="${f.costo_unitario || 0}"></td>
+      <td class="sub-linea">${pesos(Number(f.cantidad) * Number(f.precio_unitario))}</td>
+      <td><button class="btn btn-chico btn-texto" type="button" data-quitar="${i}">✕</button></td>
+    </tr>`).join("");
+
+    $("#filas-items", form).querySelectorAll(".sel-cat").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        const i = Number(sel.dataset.i), id = Number(sel.value);
+        leerFilas();
+        if (id) {
+          const p = precioPara(id, tipoVeh);
+          filas[i] = { catalogo_id: id, descripcion: p.nombre, categoria: p.categoria, cantidad: filas[i].cantidad || 1, precio_unitario: p.precio, costo_unitario: p.costo };
+        } else {
+          filas[i].catalogo_id = null;
+        }
+        pintarFilas();
+      });
+    });
+    $("#filas-items", form).querySelectorAll("input").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        leerFilas();
+        [...form.querySelectorAll("tr[data-fila]")].forEach((tr, i) => {
+          $(".sub-linea", tr).textContent = pesos(Number(filas[i].cantidad) * Number(filas[i].precio_unitario));
+        });
+        pintarTotales();
+      });
+    });
+    $("#filas-items", form).querySelectorAll("[data-quitar]").forEach((b) => {
+      b.addEventListener("click", () => {
+        leerFilas();
+        filas.splice(Number(b.dataset.quitar), 1);
+        if (!filas.length) filas.push({ descripcion: "", cantidad: 1, precio_unitario: 0, costo_unitario: 0 });
+        pintarFilas();
+      });
+    });
+    pintarTotales();
+  }
+
+  $("#add-fila", form).addEventListener("click", () => {
+    leerFilas();
+    filas.push({ descripcion: "", cantidad: 1, precio_unitario: 0, costo_unitario: 0 });
+    pintarFilas();
+  });
+  ["descuento", "iva_porcentaje", "iva_incluido"].forEach((n) => {
+    $(`[name=${n}]`, form).addEventListener("input", pintarTotales);
+    $(`[name=${n}]`, form).addEventListener("change", pintarTotales);
+  });
+  pintarFilas();
+}
+
+// ---------- Pagos y abonos ----------
+async function modalPagos(f, datos, alCambiar, itemsConocidos = null) {
+  const items = itemsConocidos || (await sb.from("factura_items").select("*").eq("factura_id", f.id)).data || [];
+  const sug = abonoSugerido(items, Number(f.total), datos.reglas);
+
+  const { fondo } = abrirModal({
+    titulo: `Pagos · ${numeroDoc(ajustesCache.prefijo_factura, f.id)}`,
+    sinPie: true,
+    cuerpo: `<div id="resumen-pagos"></div>
+      <div class="tabla-wrap" id="lista-pagos"><p class="vacio">Cargando…</p></div>
+      <h4 class="subtitulo">Registrar pago o abono</h4>
+      ${sug.monto ? `<p class="ayuda">Abono sugerido para ${esc(sug.texto)}: <b>${pesos(sug.monto)}</b></p>` : ""}
+      <div class="rejilla">
+        <div class="campo"><label>Monto *</label><input type="number" step="1" min="1" name="monto" value="${sug.monto || ""}" required></div>
+        <div class="campo"><label>Entra a la cuenta *</label><select name="cuenta_id" required>
+          ${datos.cuentas.map((c) => `<option value="${c.id}" data-com="${c.comision_porcentaje || 0}">${esc(c.nombre)}${Number(c.comision_porcentaje) ? ` (−${c.comision_porcentaje}%)` : ""}</option>`).join("")}
+        </select></div>
+        <div class="campo"><label>Tipo</label><select name="tipo"><option value="abono">Abono</option><option value="pago">Pago final</option></select></div>
+        <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${hoyISO()}"></div>
+      </div>
+      <div class="campo"><label>Nota</label><input name="nota" placeholder="Ej: transferencia, recibo 45…"></div>
+      <div><button class="btn btn-rojo" type="button" id="add-pago">Registrar</button></div>`
+  });
+
+  const pintar = async () => {
+    const { data, error } = await sb.from("pagos").select("*").eq("factura_id", f.id).order("fecha").order("id");
+    const cont = $("#lista-pagos", fondo);
+    if (error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(error))}</p>`; return; }
+    const pagado = data.reduce((s, p) => s + Number(p.monto), 0);
+    const comision = data.reduce((s, p) => s + Number(p.comision), 0);
+    const saldo = Number(f.total) - pagado;
+    $("#resumen-pagos", fondo).innerHTML = `<div class="chips">
+      <span class="chip">Total ${pesos(f.total)}</span>
+      <span class="chip chip-ok">Pagado ${pesos(pagado)}</span>
+      <span class="chip ${saldo > 0 ? "chip-alerta" : "chip-ok"}">Saldo ${pesos(saldo)}</span>
+      ${comision ? `<span class="chip chip-aviso">Comisiones ${pesos(comision)}</span>` : ""}
+    </div>`;
+    cont.innerHTML = !data.length
+      ? `<p class="vacio">Sin pagos registrados.</p>`
+      : `<table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Monto</th><th>Comisión</th><th>Neto</th><th>Nota</th><th></th></tr></thead><tbody>
+        ${data.map((p) => `<tr>
+          <td>${fechaCorta(p.fecha)}<span class="sub">${esc(p.tipo)}</span></td>
+          <td>${esc(datos.cuentas.find((c) => c.id === p.cuenta_id)?.nombre || "—")}</td>
+          <td><b>${pesos(p.monto)}</b></td>
+          <td>${Number(p.comision) ? `<span class="texto-alerta">− ${pesos(p.comision)}</span>` : "—"}</td>
+          <td>${pesos(Number(p.monto) - Number(p.comision))}</td>
+          <td>${esc(p.nota || "—")}</td>
+          <td><button class="btn btn-chico btn-texto" data-borrar="${p.id}">Eliminar</button></td></tr>`).join("")}
+      </tbody></table>`;
+    cont.onclick = async (e) => {
+      const b = e.target.closest("[data-borrar]");
+      if (!b || !confirm("¿Eliminar este pago?")) return;
+      const { error } = await sb.from("pagos").delete().eq("id", b.dataset.borrar);
+      if (error) return toast(traducirError(error), "error");
+      toast("Pago eliminado"); pintar(); alCambiar();
+    };
+  };
+
+  $("#add-pago", fondo).addEventListener("click", async () => {
+    const d = Object.fromEntries(new FormData($("form", fondo)));
+    const monto = Number(d.monto);
+    if (!monto || monto <= 0) return toast("Escribe el monto del pago.", "error");
+    const cuenta = datos.cuentas.find((c) => String(c.id) === d.cuenta_id);
+    const comision = Math.round(monto * Number(cuenta?.comision_porcentaje || 0) / 100);
+    const { error } = await sb.from("pagos").insert({
+      factura_id: f.id, cuenta_id: Number(d.cuenta_id), monto, comision,
+      tipo: d.tipo, fecha: d.fecha || hoyISO(), nota: d.nota.trim() || null
+    });
+    if (error) return toast(traducirError(error), "error");
+    toast(`Pago registrado${comision ? ` · comisión ${pesos(comision)}` : ""}`);
+    $("[name=monto]", fondo).value = "";
+    $("[name=nota]", fondo).value = "";
+    pintar(); alCambiar();
+  });
+  pintar();
+}
+
+// ---------- Panel: Gastos ----------
+async function panelGastos(cont) {
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const desde = mesFactura + "-01", hasta = finDeMes(mesFactura);
+  const [gas, prov, cue] = await Promise.all([
+    sb.from("gastos").select("*").gte("fecha", desde).lte("fecha", hasta).order("fecha", { ascending: false }),
+    sb.from("proveedores").select("id,nombre").order("nombre"),
+    sb.from("cuentas").select("*").eq("activa", true).order("nombre")
+  ]);
+  if (gas.error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(gas.error))}</p></div>`; return; }
+  const data = gas.data, proveedores = prov.data || [], cuentas = cue.data || [];
+  const recargar = () => panelGastos(cont);
+  const total = data.reduce((s, g) => s + Number(g.monto), 0);
+
+  cont.innerHTML = `
+    <div class="cifras">
+      <div class="cifra"><b>${data.length}</b><span>Gastos del mes</span></div>
+      <div class="cifra"><b>${pesos(total)}</b><span>Total gastado</span></div>
+    </div>
+    <div class="panel">
+      ${barraBusqueda("q-gas", "Buscar por descripción, proveedor o número…",
+        `<input type="month" id="mes-gas" value="${mesFactura}">
+         <select id="f-cat-gas"><option value="">Todas las categorías</option>${ops("gasto_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`,
+        `<button class="btn btn-rojo" id="nuevo-gasto">+ Registrar gasto</button>`)}
+      <div class="tabla-wrap" id="t-gas"></div>
+    </div>`;
+
+  const pintar = () => {
+    const q = $("#q-gas", cont).value, cat = $("#f-cat-gas", cont).value;
+    const lista = data.filter((g) => coincide([g.descripcion, g.numero_factura, proveedores.find((p) => p.id === g.proveedor_id)?.nombre].filter(Boolean).join(" "), q) && (!cat || g.categoria === cat));
+    $("#t-gas", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay gastos en este mes.</p>`
+      : `<table><thead><tr><th>Fecha</th><th>Descripción</th><th>Categoría</th><th>Proveedor</th><th>Cuenta</th><th>Monto</th><th></th></tr></thead><tbody>
+        ${lista.map((g) => `<tr>
+          <td>${fechaCorta(g.fecha)}</td>
+          <td><b>${esc(g.descripcion || "Sin descripción")}</b>${g.numero_factura ? `<span class="sub">Factura ${esc(g.numero_factura)}</span>` : ""}</td>
+          <td>${esc(g.categoria || "—")}</td>
+          <td>${esc(proveedores.find((p) => p.id === g.proveedor_id)?.nombre || "—")}</td>
+          <td>${esc(cuentas.find((c) => c.id === g.cuenta_id)?.nombre || "—")}</td>
+          <td><b class="texto-alerta">${pesos(g.monto)}</b></td>
+          <td><div class="acciones">
+            <button class="btn btn-chico" data-acc="editar|${g.id}">Editar</button>
+            <button class="btn btn-chico btn-texto" data-acc="borrar|${g.id}">Eliminar</button>
+          </div></td></tr>`).join("")}
+      </tbody></table>`;
+  };
+  pintar();
+
+  $("#q-gas", cont).addEventListener("input", pintar);
+  $("#f-cat-gas", cont).addEventListener("change", pintar);
+  $("#mes-gas", cont).addEventListener("change", (e) => { mesFactura = e.target.value || mesActual(); panelGastos(cont); });
+  $("#nuevo-gasto", cont).addEventListener("click", () => formGasto(null, proveedores, cuentas, recargar));
+  $("#t-gas", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const g = data.find((x) => String(x.id) === id);
+    if (accion === "editar") formGasto(g, proveedores, cuentas, recargar);
+    if (accion === "borrar") {
+      if (!confirm("¿Eliminar este gasto?")) return;
+      const { error } = await sb.from("gastos").delete().eq("id", g.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Gasto eliminado"); recargar();
+    }
+  });
+}
+
+function formGasto(g, proveedores, cuentas, alGuardar) {
+  const nuevo = !g;
+  abrirModal({
+    titulo: nuevo ? "Registrar gasto" : "Editar gasto",
+    cuerpo: `<div class="rejilla">
+        <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${g?.fecha ?? hoyISO()}"></div>
+        <div class="campo"><label>Monto *</label><input type="number" step="1" min="1" name="monto" required value="${g?.monto ?? ""}"></div>
+        <div class="campo"><label>Categoría</label>${selectOps("categoria", "gasto_categoria", g?.categoria)}</div>
+        <div class="campo"><label>Proveedor</label><select name="proveedor_id"><option value="">—</option>
+          ${proveedores.map((p) => `<option value="${p.id}" ${g?.proveedor_id === p.id ? "selected" : ""}>${esc(p.nombre)}</option>`).join("")}</select></div>
+        <div class="campo"><label>Sale de la cuenta</label><select name="cuenta_id"><option value="">—</option>
+          ${cuentas.map((c) => `<option value="${c.id}" ${g?.cuenta_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select></div>
+        <div class="campo"><label>N° factura de compra</label><input name="numero_factura" value="${esc(g?.numero_factura ?? "")}"></div>
+      </div>
+      <div class="campo"><label>Descripción</label><input name="descripcion" placeholder="Ej: 20 metros de alfombra negra" value="${esc(g?.descripcion ?? "")}"></div>`,
+    alGuardar: async (d) => {
+      const datos = {
+        fecha: d.fecha || hoyISO(), monto: Number(d.monto) || 0, categoria: d.categoria || null,
+        proveedor_id: d.proveedor_id ? Number(d.proveedor_id) : null,
+        cuenta_id: d.cuenta_id ? Number(d.cuenta_id) : null,
+        numero_factura: d.numero_factura.trim() || null, descripcion: d.descripcion.trim() || null
+      };
+      const { error } = nuevo ? await sb.from("gastos").insert(datos) : await sb.from("gastos").update(datos).eq("id", g.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Gasto registrado" : "Gasto actualizado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// ---------- Panel: Cotizaciones ----------
+async function panelCotizaciones(cont) {
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const [cot, ite, cli, veh] = await Promise.all([
+    sb.from("cotizaciones").select("*").order("id", { ascending: false }).limit(300),
+    sb.from("cotizacion_items").select("*"),
+    sb.from("clientes").select("*"),
+    sb.from("vehiculos").select("*")
+  ]);
+  if (cot.error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(cot.error))}</p></div>`; return; }
+  const data = cot.data, items = ite.data || [], clientes = cli.data || [], vehiculos = veh.data || [];
+  const recargar = () => panelCotizaciones(cont);
+  const hoy = hoyISO();
+
+  cont.innerHTML = `<div class="panel">
+    ${barraBusqueda("q-cot", "Buscar por número o cliente…",
+      `<select id="f-cot"><option value="">Todos los estados</option>${["borrador", "enviada", "aceptada", "rechazada"].map((v) => `<option>${v}</option>`).join("")}</select>`,
+      `<button class="btn btn-rojo" id="nueva-cot">+ Nueva cotización</button>`)}
+    <div class="tabla-wrap" id="t-cot"></div>
+  </div>`;
+
+  const pintar = () => {
+    const q = $("#q-cot", cont).value, est = $("#f-cot", cont).value;
+    const lista = data.filter((c) => coincide(`COT-${String(c.id).padStart(4, "0")} ${clientes.find((x) => x.id === c.cliente_id)?.nombre || ""}`, q) && (!est || c.estado === est));
+    $("#t-cot", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay cotizaciones.</p>`
+      : `<table><thead><tr><th>N°</th><th>Fecha</th><th>Cliente</th><th>Total</th><th>Válida hasta</th><th>Estado</th><th></th></tr></thead><tbody>
+        ${lista.map((c) => {
+          const vencida = c.valida_hasta && c.valida_hasta < hoy && c.estado !== "aceptada";
+          return `<tr>
+            <td><b>COT-${String(c.id).padStart(4, "0")}</b></td>
+            <td>${fechaCorta(c.fecha)}</td>
+            <td>${esc(clientes.find((x) => x.id === c.cliente_id)?.nombre || "—")}</td>
+            <td><b>${pesos(c.total)}</b></td>
+            <td>${c.valida_hasta ? fechaCorta(c.valida_hasta) : "—"}${vencida ? ` <span class="chip chip-alerta">Vencida</span>` : ""}</td>
+            <td><span class="chip ${c.estado === "aceptada" ? "chip-ok" : c.estado === "rechazada" ? "chip-alerta" : "chip-aviso"}">${c.estado}</span></td>
+            <td><div class="acciones">
+              <button class="btn btn-chico btn-rojo" data-acc="convertir|${c.id}">A factura</button>
+              <button class="btn btn-chico" data-acc="imprimir|${c.id}">Imprimir</button>
+              <button class="btn btn-chico" data-acc="editar|${c.id}">Editar</button>
+              <button class="btn btn-chico btn-texto" data-acc="borrar|${c.id}">Eliminar</button>
+            </div></td></tr>`;
+        }).join("")}
+      </tbody></table>`;
+  };
+  pintar();
+
+  $("#q-cot", cont).addEventListener("input", pintar);
+  $("#f-cot", cont).addEventListener("change", pintar);
+  $("#nueva-cot", cont).addEventListener("click", async () => formDocumento("cotizacion", null, await datosDocumento(), recargar));
+  $("#t-cot", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-acc]");
+    if (!b) return;
+    const [accion, id] = b.dataset.acc.split("|");
+    const c = data.find((x) => String(x.id) === id);
+    const misItems = items.filter((x) => x.cotizacion_id === c.id);
+    if (accion === "editar") formDocumento("cotizacion", { doc: c, items: misItems }, await datosDocumento(), recargar);
+    if (accion === "imprimir") imprimirDocumento("cotizacion", c, misItems, clientes.find((x) => x.id === c.cliente_id), vehiculos.find((v) => v.id === c.vehiculo_id), []);
+    if (accion === "convertir") {
+      if (!confirm(`¿Convertir la COT-${String(c.id).padStart(4, "0")} en factura?`)) return;
+      const { data: nueva, error } = await sb.from("facturas").insert({
+        cliente_id: c.cliente_id, vehiculo_id: c.vehiculo_id, tipo_vehiculo: c.tipo_vehiculo,
+        cotizacion_id: c.id, fecha: hoyISO(), subtotal: c.subtotal, descuento: c.descuento,
+        iva_porcentaje: c.iva_porcentaje, iva_incluido: c.iva_incluido, iva_valor: c.iva_valor,
+        total: c.total, notas: c.notas
+      }).select("id").single();
+      if (error) return toast(traducirError(error), "error");
+      const filas = misItems.map((i) => ({
+        factura_id: nueva.id, catalogo_id: i.catalogo_id, descripcion: i.descripcion, categoria: i.categoria,
+        cantidad: i.cantidad, precio_unitario: i.precio_unitario, costo_unitario: i.costo_unitario || 0
+      }));
+      if (filas.length) await sb.from("factura_items").insert(filas);
+      await sb.from("cotizaciones").update({ estado: "aceptada" }).eq("id", c.id);
+      toast(`Factura ${numeroDoc(ajustesCache.prefijo_factura, nueva.id)} creada`);
+      tabFactura = "facturas";
+      navegar();
+    }
+    if (accion === "borrar") {
+      if (!confirm("¿Eliminar esta cotización?")) return;
+      const { error } = await sb.from("cotizaciones").delete().eq("id", c.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Cotización eliminada"); recargar();
+    }
+  });
+}
+
+// ---------- Panel: Configuración de facturación ----------
+async function panelConfigFactura(cont) {
+  const [aj, ab, cue] = await Promise.all([
+    cargarAjustes(true),
+    sb.from("abonos_sugeridos").select("*").order("categoria"),
+    sb.from("cuentas").select("*").order("nombre")
+  ]);
+  const reglas = ab.data || [], cuentas = cue.data || [];
+
+  cont.innerHTML = `
+    <div class="panel">
+      <h2>Facturación</h2>
+      <div class="rejilla">
+        <div class="campo"><label>Prefijo de las facturas</label><input id="cf-prefijo" value="${esc(aj.prefijo_factura)}"></div>
+        <div class="campo"><label>Porcentaje de IVA</label><input type="number" step="0.5" min="0" id="cf-iva" value="${aj.iva_porcentaje}"></div>
+        <div class="campo"><label>Por defecto, el precio…</label><select id="cf-incluido">
+          <option value="si" ${aj.iva_incluido ? "selected" : ""}>ya incluye IVA</option>
+          <option value="no" ${!aj.iva_incluido ? "selected" : ""}>+ IVA aparte</option></select></div>
+        <div class="campo"><label>Días de validez de cotizaciones</label><input type="number" min="1" id="cf-dias" value="${aj.dias_validez_cotizacion}"></div>
+      </div>
+      <div style="margin-top:1rem"><button class="btn btn-rojo" id="guardar-cf">Guardar</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>Abono sugerido por tipo de trabajo</h2>
+      <p class="ayuda">Si pones un monto fijo, se usa ese. Si lo dejas en 0, se calcula el porcentaje sobre el total.</p>
+      <div class="tabla-wrap"><table class="tabla-config">
+        <thead><tr><th>Categoría</th><th>Porcentaje</th><th>Monto fijo</th><th></th></tr></thead>
+        <tbody>${reglas.map((r) => `<tr data-regla="${r.id}">
+          <td><b>${esc(r.categoria)}</b></td>
+          <td><input type="number" step="1" min="0" name="porcentaje" value="${Number(r.porcentaje)}"></td>
+          <td><input type="number" step="1000" min="0" name="monto_fijo" value="${Number(r.monto_fijo)}"></td>
+          <td><button class="btn btn-chico btn-texto" data-quitar-regla="${r.id}">Eliminar</button></td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+      <div class="fila-form" style="margin-top:1rem">
+        <div class="campo"><label>Nueva categoría</label>${selectOps("nueva_regla", "servicio_categoria")}</div>
+        <div class="campo"><label>Porcentaje</label><input type="number" min="0" id="nr-pct" value="50"></div>
+        <div class="campo"><label>Monto fijo</label><input type="number" min="0" step="1000" id="nr-fijo" value="0"></div>
+        <button class="btn" id="add-regla">Agregar</button>
+      </div>
+      <div style="margin-top:1rem"><button class="btn btn-rojo" id="guardar-reglas">Guardar abonos</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>Comisión de las cuentas</h2>
+      <p class="ayuda">Lo que descuenta cada medio de pago. El HUB calcula el neto de cada abono.</p>
+      <div class="tabla-wrap"><table class="tabla-config">
+        <thead><tr><th>Cuenta</th><th>Comisión %</th><th>Estado</th></tr></thead>
+        <tbody>${cuentas.map((c) => `<tr data-cuenta="${c.id}">
+          <td><b>${esc(c.nombre)}</b></td>
+          <td><input type="number" step="0.1" min="0" name="comision" value="${Number(c.comision_porcentaje)}"></td>
+          <td>${c.activa ? `<span class="chip chip-ok">Activa</span>` : `<span class="chip">Inactiva</span>`}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+      <div style="margin-top:1rem"><button class="btn btn-rojo" id="guardar-comisiones">Guardar comisiones</button></div>
+    </div>`;
+
+  $("#guardar-cf", cont).addEventListener("click", async () => {
+    const { error } = await sb.from("ajustes").update({
+      prefijo_factura: $("#cf-prefijo", cont).value.trim() || "TG",
+      iva_porcentaje: Number($("#cf-iva", cont).value) || 0,
+      iva_incluido: $("#cf-incluido", cont).value === "si",
+      dias_validez_cotizacion: Number($("#cf-dias", cont).value) || 180
+    }).eq("id", 1);
+    if (error) return toast(traducirError(error), "error");
+    await cargarAjustes(true);
+    toast("Configuración guardada");
+  });
+
+  $("#guardar-reglas", cont).addEventListener("click", async () => {
+    const cambios = [...cont.querySelectorAll("tr[data-regla]")].map((tr) =>
+      sb.from("abonos_sugeridos").update({
+        porcentaje: Number($("[name=porcentaje]", tr).value) || 0,
+        monto_fijo: Number($("[name=monto_fijo]", tr).value) || 0
+      }).eq("id", Number(tr.dataset.regla)));
+    const r = await Promise.all(cambios);
+    const fallo = r.find((x) => x.error);
+    if (fallo) return toast(traducirError(fallo.error), "error");
+    toast("Abonos guardados");
+  });
+
+  $("#add-regla", cont).addEventListener("click", async () => {
+    const categoria = $("[name=nueva_regla]", cont).value;
+    if (!categoria) return toast("Elige una categoría.", "error");
+    const { error } = await sb.from("abonos_sugeridos").insert({
+      categoria, porcentaje: Number($("#nr-pct", cont).value) || 0, monto_fijo: Number($("#nr-fijo", cont).value) || 0
+    });
+    if (error) return toast(traducirError(error), "error");
+    toast("Regla agregada"); panelConfigFactura(cont);
+  });
+
+  $("#guardar-comisiones", cont).addEventListener("click", async () => {
+    const cambios = [...cont.querySelectorAll("tr[data-cuenta]")].map((tr) =>
+      sb.from("cuentas").update({ comision_porcentaje: Number($("[name=comision]", tr).value) || 0 }).eq("id", Number(tr.dataset.cuenta)));
+    const r = await Promise.all(cambios);
+    const fallo = r.find((x) => x.error);
+    if (fallo) return toast(traducirError(fallo.error), "error");
+    toast("Comisiones guardadas");
+  });
+
+  cont.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-quitar-regla]");
+    if (!b || !confirm("¿Eliminar esta regla de abono?")) return;
+    const { error } = await sb.from("abonos_sugeridos").delete().eq("id", b.dataset.quitarRegla);
+    if (error) return toast(traducirError(error), "error");
+    toast("Regla eliminada"); panelConfigFactura(cont);
+  });
+}
+
+// ---------- Impresión ----------
+function imprimirDocumento(tipo, doc, items, cliente, vehiculo, pagos) {
+  const esFactura = tipo === "factura";
+  const numero = esFactura ? numeroDoc(ajustesCache.prefijo_factura, doc.id) : `COT-${String(doc.id).padStart(4, "0")}`;
+  const pagado = (pagos || []).reduce((s, p) => s + Number(p.monto), 0);
+  const saldo = Number(doc.total) - pagado;
+
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8">
+    <title>${numero} · The Garage</title>
+    <style>
+      *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#111;max-width:780px;margin:0 auto;padding:28px}
+      .cab{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:4px solid #D8343A;padding-bottom:12px;margin-bottom:18px}
+      .cab h1{margin:0;font-size:26px;letter-spacing:.5px}.cab p{margin:2px 0;font-size:12px;color:#555}
+      .doc{text-align:right}.doc b{font-size:20px}
+      h2{font-size:13px;text-transform:uppercase;color:#777;margin:18px 0 6px;letter-spacing:.06em}
+      table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
+      th{text-align:left;background:#111;color:#fff;padding:7px 8px;font-size:12px}
+      td{padding:7px 8px;border-bottom:1px solid #ddd}
+      .num{text-align:right}
+      .tot{margin-top:14px;margin-left:auto;width:290px;font-size:14px}
+      .tot div{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #eee}
+      .tot .fin{font-size:18px;font-weight:bold;border-bottom:3px solid #D8343A}
+      .pie{margin-top:26px;font-size:11px;color:#666;border-top:1px solid #ddd;padding-top:10px}
+      @media print{body{padding:0}.noprint{display:none}}
+      .noprint{margin-bottom:16px}
+      .btn{background:#D8343A;color:#fff;border:0;padding:10px 18px;border-radius:4px;cursor:pointer;font-size:14px}
+    </style></head><body>
+    <div class="noprint"><button class="btn" onclick="window.print()">Imprimir o guardar como PDF</button></div>
+    <div class="cab">
+      <div><h1>THE GARAGE</h1><p>Interior Custom</p><p>Tapicería · Tapetes · Detailing · Forros · Polarizado · PPF</p></div>
+      <div class="doc"><b>${esFactura ? "CUENTA DE COBRO" : "COTIZACIÓN"}</b><p>N° ${numero}</p>
+        <p>Fecha: ${fechaCorta(doc.fecha)}</p>
+        ${esFactura && doc.fecha_entrega ? `<p>Entrega: ${fechaCorta(doc.fecha_entrega)}</p>` : ""}
+        ${!esFactura && doc.valida_hasta ? `<p>Válida hasta: ${fechaCorta(doc.valida_hasta)}</p>` : ""}
+        ${doc.numero_dian ? `<p>Factura DIAN: ${esc(doc.numero_dian)}</p>` : ""}</div>
+    </div>
+    <h2>Cliente</h2>
+    <p><b>${esc(cliente?.nombre || "—")}</b><br>
+      ${esc([cliente?.tipo_documento, cliente?.documento].filter(Boolean).join(" "))}<br>
+      ${esc([cliente?.telefono, cliente?.email].filter(Boolean).join(" · "))}<br>
+      ${esc([cliente?.direccion, cliente?.ciudad].filter(Boolean).join(", "))}</p>
+    ${vehiculo ? `<h2>Vehículo</h2><p>${esc([vehiculo.marca, vehiculo.referencia, vehiculo.anio, vehiculo.color].filter(Boolean).join(" "))}${vehiculo.placa ? ` · Placa ${esc(vehiculo.placa)}` : ""}</p>` : ""}
+    <h2>Detalle</h2>
+    <table><thead><tr><th>Descripción</th><th class="num">Cant.</th><th class="num">Valor unitario</th><th class="num">Total</th></tr></thead>
+      <tbody>${items.map((i) => `<tr><td>${esc(i.descripcion)}</td><td class="num">${Number(i.cantidad)}</td>
+        <td class="num">${pesos(i.precio_unitario)}</td><td class="num">${pesos(Number(i.cantidad) * Number(i.precio_unitario))}</td></tr>`).join("")}</tbody>
+    </table>
+    <div class="tot">
+      <div><span>Subtotal</span><span>${pesos(doc.subtotal)}</span></div>
+      ${Number(doc.descuento) ? `<div><span>Descuento</span><span>− ${pesos(doc.descuento)}</span></div>` : ""}
+      ${Number(doc.iva_valor) ? `<div><span>IVA ${doc.iva_porcentaje}%${doc.iva_incluido ? " (incluido)" : ""}</span><span>${pesos(doc.iva_valor)}</span></div>` : ""}
+      <div class="fin"><span>TOTAL</span><span>${pesos(doc.total)}</span></div>
+      ${esFactura && pagado ? `<div><span>Abonado</span><span>${pesos(pagado)}</span></div>
+        <div class="fin"><span>SALDO</span><span>${pesos(saldo)}</span></div>` : ""}
+    </div>
+    ${doc.notas ? `<h2>Notas</h2><p>${esc(doc.notas)}</p>` : ""}
+    <div class="pie">Documento generado por The Garage HUB. ${esFactura ? "Este documento es un soporte interno de cobro y no reemplaza la factura electrónica de la DIAN." : "Precios sujetos a revisión del vehículo."}</div>
+    </body></html>`;
+
+  const v = window.open("", "_blank");
+  if (!v) return toast("Tu navegador bloqueó la ventana. Permite las ventanas emergentes.", "error");
+  v.document.write(html);
+  v.document.close();
 }
 
 // ---------- Arranque ----------

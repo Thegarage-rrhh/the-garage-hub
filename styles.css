@@ -14,7 +14,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--negro); color: var(--blanco); font-family: var(--texto); font-size: 16px; line-height: 1.5; }
+html, body { color-scheme: dark; margin: 0; background: var(--negro); color: var(--blanco); font-family: var(--texto); font-size: 16px; line-height: 1.5; }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--rojo); outline-offset: 2px; }
 a { color: var(--blanco); }
@@ -179,6 +179,22 @@ details[open] summary::after { content: " −"; }
 .chip-apagado { opacity: .45; }
 .chip-x { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 0 0 .35rem; font-size: .8rem; }
 .chip-x:hover { color: var(--rojo); }
+
+/* ---------- Fase 6 · Facturación ---------- */
+.modal-ancho { max-width: 960px; }
+.tabla-items { min-width: 640px; }
+.tabla-items th { font-size: .75rem; }
+.tabla-items td { padding: .35rem .3rem; vertical-align: top; }
+.tabla-items input, .tabla-items select { background: var(--negro); border: 1px solid var(--linea); border-radius: 4px; padding: .4rem .5rem; width: 100%; }
+.tabla-items td:first-child { min-width: 240px; }
+.tabla-items .sel-cat { margin-bottom: .3rem; }
+.tabla-items td input[type=number] { min-width: 80px; }
+.sub-linea { white-space: nowrap; padding-top: .8rem !important; }
+.totales { margin: 1rem 0 0 auto; max-width: 340px; }
+.totales div { display: flex; justify-content: space-between; gap: 1rem; padding: .35rem 0; border-bottom: 1px solid var(--linea); }
+.totales .total-final { font-size: 1.25rem; border-bottom: 3px solid var(--rojo); padding: .6rem 0; }
+.totales .sugerido { color: var(--ambar); border-bottom: 0; }
+@media (max-width: 640px) { .totales { max-width: none; } }
 
 /* ---------- Celular ---------- */
 @media (max-width: 860px) {

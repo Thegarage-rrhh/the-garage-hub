@@ -920,6 +920,8 @@ async function vistaMisTareas(el, conEncabezado = true) {
   if (r.error) { cont.innerHTML = `<p class="vacio">${esc(traducirError(r.error))}</p>`; return; }
 
   const visibles = r.tareas.filter((t) => t.estado !== "terminada" || t.fecha === hoy);
+  const idsProy = [...new Set(visibles.map((t) => t.proyecto_id).filter(Boolean))];
+  const proyectos = idsProy.length ? (await sb.from("proyectos").select("id,titulo").in("id", idsProy)).data || [] : [];
   if (!visibles.length) {
     cont.innerHTML = `<div class="panel"><p class="vacio">No tienes tareas asignadas. Tu administrador te las asigna desde el HUB.</p></div>`;
     return;
@@ -940,6 +942,7 @@ async function vistaMisTareas(el, conEncabezado = true) {
           ${t.descripcion ? `<p class="sub">${esc(t.descripcion)}</p>` : ""}
           <div class="chips">
             <span class="chip ${est.clase}">${est.texto}</span>
+            ${t.proyecto_id ? `<span class="chip chip-info">${esc(proyectos.find((p) => p.id === t.proyecto_id)?.titulo || "Orden de trabajo")}</span>` : ""}
             ${t.fecha !== hoy ? `<span class="chip chip-aviso">De ${fechaCorta(t.fecha)}</span>` : ""}
             ${t.minutos_estimados ? `<span class="chip">Estimado: ${duracion(t.minutos_estimados)}</span>` : ""}
             <span class="chip ${atrasada ? "chip-alerta" : ""}">Real: <b data-tiempo="${t.id}">${duracion(min)}</b></span>
@@ -1000,10 +1003,27 @@ async function vistaMisTareas(el, conEncabezado = true) {
 
 // ---------- Vista admin: Tareas ----------
 async function vistaTareasAdmin(el) {
+  el.innerHTML = encabezado("Tareas", "Órdenes de trabajo por vehículo y tareas del día.") +
+    `<div class="pestanas">
+      <button class="pestana ${tabTareas === "proyectos" ? "activa" : ""}" data-tab="proyectos">Órdenes de trabajo</button>
+      <button class="pestana ${tabTareas === "dia" ? "activa" : ""}" data-tab="dia">Por día</button>
+    </div><div id="panel-tareas"></div>`;
+  $(".pestanas", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    tabTareas = b.dataset.tab;
+    vistaTareasAdmin(el);
+  });
+  const caja = $("#panel-tareas", el);
+  if (tabTareas === "proyectos") panelProyectos(caja);
+  else panelTareasDia(caja);
+}
+
+async function panelTareasDia(el) {
   if (!diaTareas) diaTareas = hoyISO();
   const hoy = hoyISO();
 
-  el.innerHTML = encabezado("Tareas", `${diaTareas === hoy ? "Hoy · " : ""}${fechaCorta(diaTareas)}`,
+  el.innerHTML = encabezado("Tareas del día", `${diaTareas === hoy ? "Hoy · " : ""}${fechaCorta(diaTareas)}`,
     `<div class="acciones">
       <button class="btn" data-dia="-1">←</button>
       <button class="btn" data-dia="0">Hoy</button>
@@ -1015,12 +1035,12 @@ async function vistaTareasAdmin(el) {
     const b = e.target.closest("[data-dia]");
     if (!b) return;
     diaTareas = b.dataset.dia === "0" ? hoy : sumarDias(diaTareas, Number(b.dataset.dia));
-    vistaTareasAdmin(el);
+    panelTareasDia(el);
   });
 
   const per = await sb.from("perfiles").select("id,nombre,email,cargo,rol,activo").eq("activo", true).order("nombre");
   const empleados = (per.data || []).filter((p) => p.rol === "empleado");
-  $("#nueva-tarea", el).addEventListener("click", () => formTarea(null, empleados, () => vistaTareasAdmin(el)));
+  $("#nueva-tarea", el).addEventListener("click", () => formTarea(null, empleados, () => panelTareasDia(el)));
 
   const r = await cargarTareas(
     sb.from("tareas").select("*").gte("fecha", sumarDias(diaTareas, -60)).lte("fecha", diaTareas).order("id")
@@ -1067,26 +1087,26 @@ async function vistaTareasAdmin(el) {
     if (!b) return;
     const [accion, id] = b.dataset.acc.split("|");
     const t = r.tareas.find((x) => String(x.id) === id);
-    if (accion === "editar") formTarea(t, empleados, () => vistaTareasAdmin(el));
+    if (accion === "editar") formTarea(t, empleados, () => panelTareasDia(el));
     if (accion === "tiempos") modalTiempos(t, nombre(t.empleado_id), r.tramos.filter((x) => x.tarea_id === t.id));
     if (accion === "borrar") {
       if (!confirm(`¿Eliminar la tarea "${t.titulo}"? También se borra su historial de tiempos.`)) return;
       const { error } = await sb.from("tareas").delete().eq("id", t.id);
       if (error) return toast(traducirError(error), "error");
       toast("Tarea eliminada");
-      vistaTareasAdmin(el);
+      panelTareasDia(el);
     }
   };
 }
 
-function formTarea(t, empleados, alGuardar) {
+function formTarea(t, empleados, alGuardar, proyecto = null) {
   const nuevo = !t;
   abrirModal({
-    titulo: nuevo ? "Asignar tarea" : "Editar tarea",
+    titulo: nuevo ? (proyecto ? `Agregar proceso · ${proyecto.titulo}` : "Asignar tarea") : "Editar tarea",
     botonTexto: nuevo ? "Asignar" : "Guardar cambios",
     cuerpo: `
       <div class="campo"><label>Tarea *</label>
-        <input name="titulo" required placeholder="Ej: Tapizar sillas Mazda 3" value="${esc(t?.titulo ?? "")}"></div>
+        <input name="titulo" required placeholder="${proyecto ? "Ej: Detailing completo" : "Ej: Tapizar sillas Mazda 3"}" value="${esc(t?.titulo ?? "")}"></div>
       <div class="campo"><label>Detalles</label>
         <textarea name="descripcion" rows="2" placeholder="Color, material, placa del carro, observaciones…">${esc(t?.descripcion ?? "")}</textarea></div>
       <div class="rejilla">
@@ -1109,6 +1129,7 @@ function formTarea(t, empleados, alGuardar) {
         fecha: d.fecha || hoyISO(),
         minutos_estimados: d.minutos_estimados ? Number(d.minutos_estimados) : null
       };
+      if (proyecto) datos.proyecto_id = proyecto.id;
       if (!nuevo) datos.estado = d.estado;
       const { error } = nuevo
         ? await sb.from("tareas").insert(datos)
@@ -3227,6 +3248,175 @@ function formGastoFijo(f, proveedores, cuentas, alGuardar) {
       return true;
     }
   });
+}
+
+// =====================================================
+//  PROYECTOS (órdenes de trabajo)
+// =====================================================
+let tabTareas = "proyectos";
+
+const ESTADO_PROYECTO = {
+  pendiente: { texto: "Sin iniciar", clase: "" },
+  en_proceso: { texto: "En proceso", clase: "chip-aviso" },
+  listo: { texto: "Listo para entregar", clase: "chip-ok" },
+  entregado: { texto: "Entregado", clase: "chip-info" },
+  cancelado: { texto: "Cancelado", clase: "chip-alerta" }
+};
+
+async function panelProyectos(cont) {
+  cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
+  const [pro, tar, tie, cli, veh, per] = await Promise.all([
+    sb.from("proyectos").select("*").order("id", { ascending: false }).limit(200),
+    sb.from("tareas").select("*").not("proyecto_id", "is", null),
+    sb.from("tarea_tiempos").select("*"),
+    sb.from("clientes").select("id,nombre"),
+    sb.from("vehiculos").select("*"),
+    sb.from("perfiles").select("id,nombre,email,rol,activo").order("nombre")
+  ]);
+  if (pro.error) { cont.innerHTML = `<div class="panel"><p class="vacio">${esc(traducirError(pro.error))}</p></div>`; return; }
+  const proyectos = pro.data, tareas = tar.data || [], tiempos = tie.data || [];
+  const clientes = cli.data || [], vehiculos = veh.data || [];
+  const empleados = (per.data || []).filter((p) => p.activo && p.rol === "empleado");
+  const recargar = () => panelProyectos(cont);
+  const hoy = hoyISO();
+
+  cont.innerHTML = `<div class="panel">
+    ${barraBusqueda("q-pro", "Buscar por cliente, vehículo o placa…",
+      `<select id="f-pro"><option value="">Abiertos</option><option value="todos">Todos</option>
+        ${Object.entries(ESTADO_PROYECTO).map(([k, v]) => `<option value="${k}">${v.texto}</option>`).join("")}</select>`,
+      `<button class="btn btn-rojo" id="nuevo-pro">+ Nueva orden de trabajo</button>`)}
+    <div id="lista-pro"></div>
+  </div>`;
+
+  const pintar = () => {
+    const q = $("#q-pro", cont).value, filtro = $("#f-pro", cont).value;
+    const lista = proyectos.filter((p) => {
+      const v = vehiculos.find((x) => x.id === p.vehiculo_id);
+      const texto = [p.titulo, clientes.find((c) => c.id === p.cliente_id)?.nombre, v?.marca, v?.referencia, v?.placa].filter(Boolean).join(" ");
+      const estadoOk = filtro === "todos" ? true : filtro ? p.estado === filtro : !["entregado", "cancelado"].includes(p.estado);
+      return coincide(texto, q) && estadoOk;
+    });
+    $("#lista-pro", cont).innerHTML = !lista.length
+      ? `<p class="vacio">No hay órdenes de trabajo. Crea la primera.</p>`
+      : lista.map((p) => {
+        const misTareas = tareas.filter((t) => t.proyecto_id === p.id);
+        const hechas = misTareas.filter((t) => t.estado === "terminada").length;
+        const pct = misTareas.length ? Math.round(hechas / misTareas.length * 100) : 0;
+        const minutos = tiempos.filter((x) => misTareas.some((t) => t.id === x.tarea_id))
+          .reduce((s, x) => s + ((x.fin ? new Date(x.fin) : new Date()) - new Date(x.inicio)) / 60000, 0);
+        const v = vehiculos.find((x) => x.id === p.vehiculo_id);
+        const est = ESTADO_PROYECTO[p.estado];
+        const atrasado = p.fecha_entrega && p.fecha_entrega < hoy && !["entregado", "cancelado"].includes(p.estado);
+        return `<div class="proyecto">
+          <div class="proyecto-cab">
+            <div>
+              <h3>${esc(p.titulo)}</h3>
+              <div class="chips">
+                <span class="chip ${est.clase}">${est.texto}</span>
+                ${p.cliente_id ? `<span class="chip">${esc(clientes.find((c) => c.id === p.cliente_id)?.nombre || "")}</span>` : ""}
+                ${v ? `<span class="chip">${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</span>` : ""}
+                ${p.fecha_entrega ? `<span class="chip ${atrasado ? "chip-alerta fuerte" : ""}">Entrega ${fechaCorta(p.fecha_entrega)}${atrasado ? " · atrasada" : ""}</span>` : ""}
+                ${minutos ? `<span class="chip">${duracion(minutos)} trabajadas</span>` : ""}
+              </div>
+            </div>
+            <div class="acciones">
+              <button class="btn btn-chico btn-rojo" data-pro="tarea|${p.id}">+ Tarea</button>
+              <button class="btn btn-chico" data-pro="editar|${p.id}">Editar</button>
+              <button class="btn btn-chico btn-texto" data-pro="borrar|${p.id}">Eliminar</button>
+            </div>
+          </div>
+          <div class="progreso"><div class="progreso-relleno" style="width:${pct}%"></div></div>
+          <p class="ayuda">${hechas} de ${misTareas.length} procesos terminados · ${pct}%</p>
+          ${misTareas.length ? `<div class="tabla-wrap"><table>
+            <thead><tr><th>Proceso</th><th>Responsable</th><th>Estado</th><th>Estimado</th><th>Real</th><th></th></tr></thead>
+            <tbody>${misTareas.map((t) => {
+              const { min, corriendo } = tiempoTarea(tiempos.filter((x) => x.tarea_id === t.id));
+              const e = ESTADO_TAREA[t.estado];
+              return `<tr>
+                <td><b>${esc(t.titulo)}</b>${t.descripcion ? `<span class="sub">${esc(t.descripcion)}</span>` : ""}</td>
+                <td>${esc((per.data || []).find((x) => x.id === t.empleado_id)?.nombre || "Sin asignar")}</td>
+                <td><span class="chip ${e.clase}">${e.texto}</span>${corriendo ? ` <span class="chip chip-ok">▶</span>` : ""}</td>
+                <td>${t.minutos_estimados ? duracion(t.minutos_estimados) : "—"}</td>
+                <td>${min ? duracion(min) : "—"}</td>
+                <td><div class="acciones">
+                  <button class="btn btn-chico" data-pro="editar-tarea|${t.id}">Editar</button>
+                  <button class="btn btn-chico btn-texto" data-pro="borrar-tarea|${t.id}">Quitar</button>
+                </div></td></tr>`;
+            }).join("")}</tbody></table></div>`
+            : `<p class="vacio">Esta orden todavía no tiene procesos. Agrega el primero con "+ Tarea".</p>`}
+        </div>`;
+      }).join("");
+  };
+  pintar();
+
+  $("#q-pro", cont).addEventListener("input", pintar);
+  $("#f-pro", cont).addEventListener("change", pintar);
+  $("#nuevo-pro", cont).addEventListener("click", () => formProyecto(null, clientes, vehiculos, recargar));
+  $("#lista-pro", cont).addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-pro]");
+    if (!b) return;
+    const [accion, id] = b.dataset.pro.split("|");
+    const p = proyectos.find((x) => String(x.id) === id);
+    if (accion === "editar") formProyecto(p, clientes, vehiculos, recargar);
+    if (accion === "tarea") formTarea(null, empleados, recargar, p);
+    if (accion === "editar-tarea") formTarea(tareas.find((t) => String(t.id) === id), empleados, recargar);
+    if (accion === "borrar-tarea") {
+      if (!confirm("¿Quitar este proceso de la orden?")) return;
+      const { error } = await sb.from("tareas").delete().eq("id", id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Proceso eliminado"); recargar();
+    }
+    if (accion === "borrar") {
+      if (!confirm(`¿Eliminar la orden "${p.titulo}"? Sus tareas quedan sueltas, no se borran.`)) return;
+      const { error } = await sb.from("proyectos").delete().eq("id", p.id);
+      if (error) return toast(traducirError(error), "error");
+      toast("Orden eliminada"); recargar();
+    }
+  });
+}
+
+function formProyecto(p, clientes, vehiculos, alGuardar) {
+  const nuevo = !p;
+  const modal = abrirModal({
+    titulo: nuevo ? "Nueva orden de trabajo" : "Editar orden de trabajo",
+    cuerpo: `<div class="campo"><label>Título *</label>
+        <input name="titulo" required placeholder="Ej: Mazda 3 ABC123 · Andrés Gómez" value="${esc(p?.titulo ?? "")}"></div>
+      <div class="rejilla">
+        <div class="campo"><label>Cliente</label><select name="cliente_id"><option value="">—</option>
+          ${clientes.map((c) => `<option value="${c.id}" ${p?.cliente_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select></div>
+        <div class="campo"><label>Vehículo</label><select name="vehiculo_id"><option value="">—</option></select></div>
+        <div class="campo"><label>Fecha de entrega</label><input type="date" name="fecha_entrega" value="${p?.fecha_entrega ?? ""}"></div>
+        ${nuevo ? "" : `<div class="campo"><label>Estado</label><select name="estado">
+          ${Object.entries(ESTADO_PROYECTO).map(([k, v]) => `<option value="${k}" ${p.estado === k ? "selected" : ""}>${v.texto}</option>`).join("")}
+        </select></div>`}
+      </div>
+      <div class="campo"><label>Notas</label><input name="notas" value="${esc(p?.notas ?? "")}"></div>
+      <p class="ayuda">El estado se actualiza solo según los procesos, salvo que lo pongas en Entregado o Cancelado.</p>`,
+    alGuardar: async (d) => {
+      const datos = {
+        titulo: d.titulo.trim(),
+        cliente_id: d.cliente_id ? Number(d.cliente_id) : null,
+        vehiculo_id: d.vehiculo_id ? Number(d.vehiculo_id) : null,
+        tipo_vehiculo: vehiculos.find((v) => String(v.id) === d.vehiculo_id)?.tipo || null,
+        fecha_entrega: d.fecha_entrega || null, notas: d.notas.trim() || null
+      };
+      if (!nuevo) datos.estado = d.estado;
+      const { error } = nuevo ? await sb.from("proyectos").insert(datos) : await sb.from("proyectos").update(datos).eq("id", p.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast(nuevo ? "Orden de trabajo creada" : "Orden actualizada");
+      alGuardar();
+      return true;
+    }
+  });
+
+  const selCli = $("[name=cliente_id]", modal.form), selVeh = $("[name=vehiculo_id]", modal.form);
+  const pintarAutos = () => {
+    const autos = vehiculos.filter((v) => String(v.cliente_id) === selCli.value);
+    selVeh.innerHTML = `<option value="">—</option>` + autos.map((v) =>
+      `<option value="${v.id}" ${p?.vehiculo_id === v.id ? "selected" : ""}>${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</option>`).join("");
+  };
+  pintarAutos();
+  selCli.addEventListener("change", pintarAutos);
 }
 
 // ---------- Arranque ----------

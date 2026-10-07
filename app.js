@@ -1253,16 +1253,18 @@ async function panelProductos(cont, esAdmin) {
   cont.innerHTML = `<div class="panel">
     ${barraBusqueda("q-prod", "Buscar por marca, referencia, año o material…",
       `<select id="f-cat"><option value="">Todas las categorías</option>${ops("producto_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>
-       <select id="f-est"><option value="">Todos los estados</option>${ops("producto_estado").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`,
+       <select id="f-est"><option value="">Todos los estados</option>${ops("producto_estado").map((v) => `<option>${esc(v)}</option>`).join("")}</select>
+       <select id="f-exi"><option value="hay">Disponibles</option><option value="agotado">Vendidos / agotados</option><option value="todos">Todos</option></select>`,
       esAdmin ? `<button class="btn btn-rojo" id="nuevo-prod">+ Agregar producto</button>` : "")}
     <div class="tabla-wrap" id="t-prod"></div>
   </div>`;
 
   const pintar = () => {
-    const q = $("#q-prod", cont).value, cat = $("#f-cat", cont).value, est = $("#f-est", cont).value;
+    const q = $("#q-prod", cont).value, cat = $("#f-cat", cont).value, est = $("#f-est", cont).value, exi = $("#f-exi", cont).value;
     const lista = data.filter((p) =>
       coincide([p.marca, p.referencia, p.anio, p.material, p.ubicacion, p.nombre].filter(Boolean).join(" "), q) &&
-      (!cat || p.categoria === cat) && (!est || p.estado === est));
+      (!cat || p.categoria === cat) && (!est || p.estado === est) &&
+      (exi === "todos" || (exi === "agotado" ? Number(p.cantidad) <= 0 : Number(p.cantidad) > 0)));
     $("#t-prod", cont).innerHTML = !lista.length
       ? `<p class="vacio">No hay productos que coincidan.</p>`
       : `<table><thead><tr><th>Producto</th><th>Categoría</th><th>Estado</th><th>Cantidad</th><th>Ubicación</th>${esAdmin ? "<th>Costo</th>" : ""}<th>Precio</th><th></th></tr></thead><tbody>
@@ -1276,7 +1278,8 @@ async function panelProductos(cont, esAdmin) {
           ${esAdmin ? `<td>${pesos(p.costo)}</td>` : ""}
           <td>${pesos(p.precio_venta)}</td>
           <td><div class="acciones">
-            ${esAdmin ? `<button class="btn btn-chico btn-rojo" data-acc="ajustar|${p.id}">Ajustar</button>
+            ${esAdmin && Number(p.cantidad) > 0 ? `<button class="btn btn-chico btn-rojo" data-acc="vender|${p.id}">Vender</button>` : ""}
+            ${esAdmin ? `<button class="btn btn-chico" data-acc="ajustar|${p.id}">Ajustar</button>
             <button class="btn btn-chico" data-acc="editar|${p.id}">Editar</button>` : ""}
             <button class="btn btn-chico" data-acc="historial|${p.id}">Historial</button>
             ${esAdmin ? `<button class="btn btn-chico btn-texto" data-acc="borrar|${p.id}">Eliminar</button>` : ""}
@@ -1289,6 +1292,7 @@ async function panelProductos(cont, esAdmin) {
   $("#q-prod", cont).addEventListener("input", pintar);
   $("#f-cat", cont).addEventListener("change", pintar);
   $("#f-est", cont).addEventListener("change", pintar);
+  $("#f-exi", cont).addEventListener("change", pintar);
   if (esAdmin) $("#nuevo-prod", cont).addEventListener("click", () => formProducto(null, esAdmin, recargar));
   $("#t-prod", cont).addEventListener("click", async (e) => {
     const b = e.target.closest("[data-acc]");
@@ -1296,6 +1300,7 @@ async function panelProductos(cont, esAdmin) {
     const [accion, id] = b.dataset.acc.split("|");
     const p = data.find((x) => String(x.id) === id);
     if (accion === "editar") formProducto(p, esAdmin, recargar);
+    if (accion === "vender") modalVenderProducto(p, recargar);
     if (accion === "ajustar") modalAjustar("producto", p, [p.marca, p.referencia].filter(Boolean).join(" ") || p.nombre, "unidades", recargar);
     if (accion === "historial") modalHistorial("producto", p.id);
     if (accion === "borrar") {
@@ -1303,6 +1308,68 @@ async function panelProductos(cont, esAdmin) {
       const { error } = await sb.from("productos").delete().eq("id", p.id);
       if (error) return toast(traducirError(error), "error");
       toast("Producto eliminado"); recargar();
+    }
+  });
+}
+
+// Vender un producto terminado: crea la factura, el pago y descuenta el inventario
+async function modalVenderProducto(p, alCambiar) {
+  await cargarAjustes();
+  const [cli, cue] = await Promise.all([
+    sb.from("clientes").select("id,nombre").order("nombre"),
+    sb.from("cuentas").select("*").eq("activa", true).order("nombre")
+  ]);
+  const clientes = cli.data || [], cuentas = cue.data || [];
+  const nombre = [p.marca, p.referencia].filter(Boolean).join(" ") || p.nombre;
+
+  abrirModal({
+    titulo: `Vender · ${nombre}`,
+    botonTexto: "Registrar venta",
+    cuerpo: `<p class="ayuda">Disponibles: <b>${Number(p.cantidad)}</b> · Precio de lista: <b>${pesos(p.precio_venta)}</b></p>
+      <div class="rejilla">
+        <div class="campo"><label>Cantidad *</label><input type="number" step="1" min="1" max="${Number(p.cantidad)}" name="cantidad" value="1" required></div>
+        <div class="campo"><label>Precio de venta (unidad) *</label><input type="number" step="1000" min="0" name="precio" value="${Number(p.precio_venta) || ""}" required></div>
+        <div class="campo"><label>Cliente</label><select name="cliente_id"><option value="">Venta de mostrador</option>
+          ${clientes.map((c) => `<option value="${c.id}">${esc(c.nombre)}</option>`).join("")}</select></div>
+        <div class="campo"><label>Entra a la cuenta *</label><select name="cuenta_id" required>
+          ${cuentas.map((c) => `<option value="${c.id}" data-com="${c.comision_porcentaje || 0}">${esc(c.nombre)}${Number(c.comision_porcentaje) ? ` (−${c.comision_porcentaje}%)` : ""}</option>`).join("")}</select></div>
+        <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${hoyISO()}"></div>
+      </div>
+      <p class="ayuda">Se crea la factura, se registra el pago completo y el producto sale del inventario.</p>`,
+    alGuardar: async (d) => {
+      const cantidad = Number(d.cantidad) || 0, precio = Number(d.precio) || 0;
+      if (cantidad <= 0 || cantidad > Number(p.cantidad)) { toast(`Solo hay ${Number(p.cantidad)} disponible(s).`, "error"); return false; }
+      const total = Math.round(cantidad * precio);
+
+      const { data: fac, error } = await sb.from("facturas").insert({
+        cliente_id: d.cliente_id ? Number(d.cliente_id) : null,
+        fecha: d.fecha || hoyISO(), subtotal: total, descuento: 0, total,
+        estado_trabajo: "entregado", notas: `Venta de inventario · ${nombre}`
+      }).select("id").single();
+      if (error) { toast(traducirError(error), "error"); return false; }
+
+      const { error: e2 } = await sb.from("factura_items").insert({
+        factura_id: fac.id, descripcion: `${nombre}${p.anio ? " " + p.anio : ""}${p.material ? " · " + p.material : ""}`,
+        categoria: p.categoria, cantidad, precio_unitario: precio, costo_unitario: Number(p.costo) || 0
+      });
+      if (e2) { toast(traducirError(e2), "error"); return false; }
+
+      const cuenta = cuentas.find((c) => String(c.id) === d.cuenta_id);
+      const comision = Math.round(total * Number(cuenta?.comision_porcentaje || 0) / 100);
+      await sb.from("pagos").insert({
+        factura_id: fac.id, cuenta_id: Number(d.cuenta_id), monto: total, comision,
+        tipo: "pago", fecha: d.fecha || hoyISO(), nota: "Venta de inventario"
+      });
+
+      const { error: e4 } = await sb.from("movimientos").insert({
+        tipo_item: "producto", item_id: p.id, cantidad: -cantidad,
+        motivo: `Venta · factura ${numeroDoc(ajustesCache.prefijo_factura, fac.id)}`
+      });
+      if (e4) toast("La venta se registró, pero el inventario no se descontó: " + traducirError(e4), "error");
+
+      toast(`Venta registrada · factura ${numeroDoc(ajustesCache.prefijo_factura, fac.id)} por ${pesos(total)}`);
+      alCambiar();
+      return true;
     }
   });
 }
@@ -1892,15 +1959,16 @@ async function vistaPrecios(el) {
       (!tipo || s.tipo === tipo) && (!cate || s.categoria === cate) && (esAdmin || s.activo));
     $("#t-pre", el).innerHTML = !lista.length
       ? `<p class="vacio">No hay servicios ni productos que coincidan. ${esAdmin ? "Agrega el primero." : ""}</p>`
-      : `<table><thead><tr><th>Servicio o producto</th><th>Categoría</th><th>Precio base</th>
+      : `<table><thead><tr><th>Servicio o producto</th><th>Categoría</th>
           ${tipos.map((t) => `<th>${esc(t)}</th>`).join("")}${esAdmin ? "<th></th>" : ""}</tr></thead><tbody>
         ${lista.map((s) => `<tr class="${s.activo ? "" : "fila-futura"}">
           <td><b>${esc(s.nombre)}</b><span class="sub">${esc(s.tipo)}${s.descripcion ? " · " + esc(s.descripcion) : ""}</span></td>
           <td>${esc(s.categoria || "—")}</td>
-          <td><b>${pesos(s.precio)}</b></td>
           ${tipos.map((t) => {
             const p = precioDe(s.id, t);
-            return `<td>${p && Number(p.precio) ? pesos(p.precio) : `<span class="sub">—</span>`}</td>`;
+            if (p && Number(p.precio)) return `<td>${pesos(p.precio)}</td>`;
+            if (t === "Automóvil") return `<td><b>${pesos(s.precio)}</b></td>`;
+            return `<td><span class="sub">${pesos(s.precio)}</span></td>`;
           }).join("")}
           ${esAdmin ? `<td><div class="acciones">
             <button class="btn btn-chico btn-rojo" data-acc="precios|${s.id}">Precios</button>
@@ -1909,7 +1977,7 @@ async function vistaPrecios(el) {
           </div></td>` : ""}
         </tr>`).join("")}
       </tbody></table>
-      <p class="ayuda" style="margin-top:1rem">El precio base se usa cuando el tipo de vehículo no tiene un precio propio. Un guion significa que aplica el precio base.</p>`;
+      <p class="ayuda" style="margin-top:1rem">El precio de <b>Automóvil</b> es el precio base. Los tipos de vehículo en gris usan ese mismo valor porque no tienen un precio propio; los que están en blanco sí lo tienen.</p>`;
   };
   pintar();
 
@@ -1945,7 +2013,7 @@ function formServicio(s, alGuardar) {
           <option ${s?.tipo !== "Producto" ? "selected" : ""}>Servicio</option>
           <option ${s?.tipo === "Producto" ? "selected" : ""}>Producto</option></select></div>
         <div class="campo"><label>Categoría</label>${selectOps("categoria", "servicio_categoria", s?.categoria)}</div>
-        <div class="campo"><label>Precio base</label><input type="number" step="1" min="0" name="precio" value="${s?.precio ?? 0}"></div>
+        <div class="campo"><label>Precio automóvil (base)</label><input type="number" step="1" min="0" name="precio" value="${s?.precio ?? 0}"></div>
         <div class="campo"><label>Costo estimado</label><input type="number" step="1" min="0" name="costo_estimado" value="${s?.costo_estimado ?? 0}"></div>
         <div class="campo"><label>Estado</label><select name="activo">
           <option value="si" ${s?.activo !== false ? "selected" : ""}>Activo</option>
@@ -1969,14 +2037,15 @@ function formServicio(s, alGuardar) {
 }
 
 function modalPreciosVehiculo(s, tipos, actuales, alGuardar) {
+  tipos = tipos.filter((t) => t !== "Automóvil");
   const valor = (t, campo) => actuales.find((x) => x.tipo_vehiculo === t)?.[campo] ?? "";
   abrirModal({
     titulo: `Precios por vehículo · ${s.nombre}`,
     botonTexto: "Guardar precios",
-    cuerpo: `<p class="ayuda">Llena solo los tipos de vehículo que tengan un precio distinto al base (${pesos(s.precio)}). Los que dejes vacíos usan el precio base.</p>
+    cuerpo: `<p class="ayuda">El precio de automóvil (${pesos(s.precio)}) se edita en el botón <b>Editar</b>. Aquí llenas solo los vehículos que cuesten distinto; los que dejes vacíos cobran el precio de automóvil.</p>
       <div class="tabla-wrap"><table class="tabla-config">
         <thead><tr><th>Tipo de vehículo</th><th>Precio</th><th>Costo estimado</th></tr></thead>
-        <tbody>${tipos.map((t) => `<tr data-tipo="${esc(t)}">
+        <tbody>${tipos.filter((t) => t !== "Automóvil").map((t) => `<tr data-tipo="${esc(t)}">
           <td><b>${esc(t)}</b></td>
           <td><input type="number" step="1" min="0" name="precio" value="${valor(t, "precio")}" placeholder="${s.precio}"></td>
           <td><input type="number" step="1" min="0" name="costo" value="${valor(t, "costo_estimado")}" placeholder="${s.costo_estimado}"></td>
@@ -3255,6 +3324,15 @@ function formGastoFijo(f, proveedores, cuentas, alGuardar) {
 // =====================================================
 let tabTareas = "proyectos";
 
+const diasPara = (iso) => Math.round((new Date(iso + "T12:00:00") - new Date(hoyISO() + "T12:00:00")) / 86400000);
+function textoPlazo(iso) {
+  const d = diasPara(iso);
+  if (d < 0) return `atrasada ${Math.abs(d)} día(s)`;
+  if (d === 0) return "¡es hoy!";
+  if (d === 1) return "mañana";
+  return `faltan ${d} días`;
+}
+
 const ESTADO_PROYECTO = {
   pendiente: { texto: "Sin iniciar", clase: "" },
   en_proceso: { texto: "En proceso", clase: "chip-aviso" },
@@ -3315,7 +3393,10 @@ async function panelProyectos(cont) {
                 <span class="chip ${est.clase}">${est.texto}</span>
                 ${p.cliente_id ? `<span class="chip">${esc(clientes.find((c) => c.id === p.cliente_id)?.nombre || "")}</span>` : ""}
                 ${v ? `<span class="chip">${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</span>` : ""}
-                ${p.fecha_entrega ? `<span class="chip ${atrasado ? "chip-alerta fuerte" : ""}">Entrega ${fechaCorta(p.fecha_entrega)}${atrasado ? " · atrasada" : ""}</span>` : ""}
+                <span class="chip">Inicio ${fechaCorta(p.fecha_inicio)}</span>
+                ${p.fecha_entrega
+                  ? `<span class="chip ${atrasado ? "chip-alerta fuerte" : diasPara(p.fecha_entrega) <= 2 ? "chip-aviso" : "chip-ok"}">Entrega ${fechaCorta(p.fecha_entrega)} · ${textoPlazo(p.fecha_entrega)}</span>`
+                  : `<span class="chip chip-aviso">Sin fecha de entrega</span>`}
                 ${minutos ? `<span class="chip">${duracion(minutos)} trabajadas</span>` : ""}
               </div>
             </div>
@@ -3385,7 +3466,8 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
         <div class="campo"><label>Cliente</label><select name="cliente_id"><option value="">—</option>
           ${clientes.map((c) => `<option value="${c.id}" ${p?.cliente_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select></div>
         <div class="campo"><label>Vehículo</label><select name="vehiculo_id"><option value="">—</option></select></div>
-        <div class="campo"><label>Fecha de entrega</label><input type="date" name="fecha_entrega" value="${p?.fecha_entrega ?? ""}"></div>
+        <div class="campo"><label>Fecha de inicio *</label><input type="date" name="fecha_inicio" required value="${p?.fecha_inicio ?? hoyISO()}"></div>
+        <div class="campo"><label>Fecha de entrega *</label><input type="date" name="fecha_entrega" required value="${p?.fecha_entrega ?? ""}"></div>
         ${nuevo ? "" : `<div class="campo"><label>Estado</label><select name="estado">
           ${Object.entries(ESTADO_PROYECTO).map(([k, v]) => `<option value="${k}" ${p.estado === k ? "selected" : ""}>${v.texto}</option>`).join("")}
         </select></div>`}
@@ -3398,6 +3480,7 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
         cliente_id: d.cliente_id ? Number(d.cliente_id) : null,
         vehiculo_id: d.vehiculo_id ? Number(d.vehiculo_id) : null,
         tipo_vehiculo: vehiculos.find((v) => String(v.id) === d.vehiculo_id)?.tipo || null,
+        fecha_inicio: d.fecha_inicio || hoyISO(),
         fecha_entrega: d.fecha_entrega || null, notas: d.notas.trim() || null
       };
       if (!nuevo) datos.estado = d.estado;

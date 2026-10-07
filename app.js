@@ -1047,6 +1047,8 @@ async function panelTareasDia(el) {
   );
   if (r.error) { $("#lista-tareas", el).innerHTML = `<p class="vacio">${esc(traducirError(r.error))}</p>`; return; }
 
+  const idsProyDia = [...new Set(r.tareas.map((t) => t.proyecto_id).filter(Boolean))];
+  const proyectosDia = idsProyDia.length ? (await sb.from("proyectos").select("id,titulo").in("id", idsProyDia)).data || [] : [];
   const delDia = r.tareas.filter((t) => t.fecha === diaTareas);
   const atrasadas = r.tareas.filter((t) => t.fecha < diaTareas && t.estado !== "terminada");
   const nombre = (id) => (per.data || []).find((p) => p.id === id)?.nombre || "Sin asignar";
@@ -1056,7 +1058,7 @@ async function panelTareasDia(el) {
     const est = ESTADO_TAREA[t.estado];
     const dif = t.minutos_estimados ? min - t.minutos_estimados : null;
     return `<tr>
-      <td><b>${esc(t.titulo)}</b>${t.descripcion ? `<span class="sub">${esc(t.descripcion)}</span>` : ""}</td>
+      <td><b>${esc(t.titulo)}</b>${t.proyecto_id ? `<span class="sub">${esc(proyectosDia.find((x) => x.id === t.proyecto_id)?.titulo || "Orden de trabajo")}</span>` : t.descripcion ? `<span class="sub">${esc(t.descripcion)}</span>` : ""}</td>
       <td>${esc(nombre(t.empleado_id))}</td>
       <td><span class="chip ${est.clase}">${est.texto}</span>${corriendo ? ` <span class="chip chip-ok">▶</span>` : ""}</td>
       <td>${t.minutos_estimados ? duracion(t.minutos_estimados) : "—"}</td>
@@ -1099,8 +1101,14 @@ async function panelTareasDia(el) {
   };
 }
 
-function formTarea(t, empleados, alGuardar, proyecto = null) {
+async function formTarea(t, empleados, alGuardar, proyecto = null) {
   const nuevo = !t;
+  let abiertas = [];
+  if (!proyecto) {
+    const { data } = await sb.from("proyectos").select("id,titulo,estado")
+      .not("estado", "in", "(entregado,cancelado)").order("id", { ascending: false }).limit(100);
+    abiertas = data || [];
+  }
   abrirModal({
     titulo: nuevo ? (proyecto ? `Agregar proceso · ${proyecto.titulo}` : "Asignar tarea") : "Editar tarea",
     botonTexto: nuevo ? "Asignar" : "Guardar cambios",
@@ -1108,13 +1116,18 @@ function formTarea(t, empleados, alGuardar, proyecto = null) {
       <div class="campo"><label>Tarea *</label>
         <input name="titulo" required placeholder="${proyecto ? "Ej: Detailing completo" : "Ej: Tapizar sillas Mazda 3"}" value="${esc(t?.titulo ?? "")}"></div>
       <div class="campo"><label>Detalles</label>
-        <textarea name="descripcion" rows="2" placeholder="Color, material, placa del carro, observaciones…">${esc(t?.descripcion ?? "")}</textarea></div>
+        <textarea name="descripcion" rows="2" placeholder="Color, material, observaciones…">${esc(t?.descripcion ?? "")}</textarea></div>
+      ${proyecto ? `<p class="ayuda">Esta tarea queda dentro de <b>${esc(proyecto.titulo)}</b>, así que el cliente y el vehículo ya están registrados ahí.</p>` : ""}
       <div class="rejilla">
         <div class="campo"><label>Empleado *</label><select name="empleado_id" required>
           <option value="">Selecciona…</option>
           ${empleados.map((p) => `<option value="${p.id}" ${t?.empleado_id === p.id ? "selected" : ""}>${esc(p.nombre || p.email)}</option>`).join("")}
         </select></div>
         <div class="campo"><label>Fecha</label><input type="date" name="fecha" value="${esc(t?.fecha ?? diaTareas ?? hoyISO())}"></div>
+        ${proyecto ? "" : `<div class="campo"><label>Orden de trabajo</label><select name="proyecto_id">
+          <option value="">Tarea suelta (sin vehículo)</option>
+          ${abiertas.map((x) => `<option value="${x.id}" ${t?.proyecto_id === x.id ? "selected" : ""}>${esc(x.titulo)}</option>`).join("")}
+        </select></div>`}
         <div class="campo"><label>Tiempo estimado (minutos)</label>
           <input type="number" min="0" name="minutos_estimados" placeholder="Ej: 120" value="${t?.minutos_estimados ?? ""}"></div>
         ${nuevo ? "" : `<div class="campo"><label>Estado</label><select name="estado">
@@ -1130,6 +1143,7 @@ function formTarea(t, empleados, alGuardar, proyecto = null) {
         minutos_estimados: d.minutos_estimados ? Number(d.minutos_estimados) : null
       };
       if (proyecto) datos.proyecto_id = proyecto.id;
+      else if ("proyecto_id" in d) datos.proyecto_id = d.proyecto_id ? Number(d.proyecto_id) : null;
       if (!nuevo) datos.estado = d.estado;
       const { error } = nuevo
         ? await sb.from("tareas").insert(datos)
@@ -2289,6 +2303,7 @@ async function panelFacturas(cont) {
             <td><span class="chip">${f.estado_trabajo.replace("_", " ")}</span></td>
             <td><div class="acciones">
               <button class="btn btn-chico btn-rojo" data-acc="pagos|${f.id}">Pagos</button>
+              <button class="btn btn-chico" data-acc="whatsapp|${f.id}">WhatsApp</button>
               <button class="btn btn-chico" data-acc="imprimir|${f.id}">Imprimir</button>
               <button class="btn btn-chico" data-acc="editar|${f.id}">Editar</button>
               <button class="btn btn-chico btn-texto" data-acc="anular|${f.id}">${f.estado_pago === "anulada" ? "Eliminar" : "Anular"}</button>
@@ -2311,6 +2326,7 @@ async function panelFacturas(cont) {
     if (accion === "editar") formDocumento("factura", { doc: f, items: misItems }, await datosDocumento(), recargar);
     if (accion === "pagos") modalPagos(f, await datosDocumento(), recargar);
     if (accion === "imprimir") imprimirDocumento("factura", f, misItems, clientes.find((c) => c.id === f.cliente_id), vehiculos.find((v) => v.id === f.vehiculo_id), pagos.filter((p) => p.factura_id === f.id));
+    if (accion === "whatsapp") enviarWhatsApp("factura", f, misItems, clientes.find((c) => c.id === f.cliente_id), vehiculos.find((v) => v.id === f.vehiculo_id), pagos.filter((p) => p.factura_id === f.id));
     if (accion === "anular") {
       if (f.estado_pago === "anulada") {
         if (!confirm("¿Eliminar definitivamente esta factura anulada?")) return;
@@ -2817,6 +2833,7 @@ async function panelCotizaciones(cont) {
             <td><span class="chip ${c.estado === "aceptada" ? "chip-ok" : c.estado === "rechazada" ? "chip-alerta" : "chip-aviso"}">${c.estado}</span></td>
             <td><div class="acciones">
               <button class="btn btn-chico btn-rojo" data-acc="convertir|${c.id}">A factura</button>
+              <button class="btn btn-chico" data-acc="whatsapp|${c.id}">WhatsApp</button>
               <button class="btn btn-chico" data-acc="imprimir|${c.id}">Imprimir</button>
               <button class="btn btn-chico" data-acc="editar|${c.id}">Editar</button>
               <button class="btn btn-chico btn-texto" data-acc="borrar|${c.id}">Eliminar</button>
@@ -2837,6 +2854,10 @@ async function panelCotizaciones(cont) {
     const misItems = items.filter((x) => x.cotizacion_id === c.id);
     if (accion === "editar") formDocumento("cotizacion", { doc: c, items: misItems }, await datosDocumento(), recargar);
     if (accion === "imprimir") imprimirDocumento("cotizacion", c, misItems, clientes.find((x) => x.id === c.cliente_id), vehiculos.find((v) => v.id === c.vehiculo_id), []);
+    if (accion === "whatsapp") {
+      enviarWhatsApp("cotizacion", c, misItems, clientes.find((x) => x.id === c.cliente_id), vehiculos.find((v) => v.id === c.vehiculo_id));
+      if (c.estado === "borrador") { await sb.from("cotizaciones").update({ estado: "enviada" }).eq("id", c.id); recargar(); }
+    }
     if (accion === "convertir") {
       if (!confirm(`¿Convertir la COT-${String(c.id).padStart(4, "0")} en factura?`)) return;
       const { data: nueva, error } = await sb.from("facturas").insert({
@@ -2973,6 +2994,46 @@ async function panelConfigFactura(cont) {
     if (error) return toast(traducirError(error), "error");
     toast("Regla eliminada"); panelConfigFactura(cont);
   });
+}
+
+// ---------- Enviar por WhatsApp ----------
+function telefonoWhatsapp(tel) {
+  const d = String(tel || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.length === 10 && d.startsWith("3")) return "57" + d;
+  if (d.length === 12 && d.startsWith("57")) return d;
+  return d;
+}
+
+function enviarWhatsApp(tipo, doc, items, cliente, vehiculo, pagos = []) {
+  const esFactura = tipo === "factura";
+  const numero = esFactura ? numeroDoc(ajustesCache.prefijo_factura, doc.id) : `COT-${String(doc.id).padStart(4, "0")}`;
+  const pagado = pagos.reduce((s, p) => s + Number(p.monto), 0);
+  const saldo = Number(doc.total) - pagado;
+  const nombre = (cliente?.nombre || "").split(" ")[0];
+
+  const lineas = [
+    `Hola${nombre ? " " + nombre : ""}, te comparto ${esFactura ? "la cuenta de cobro" : "la cotización"} ${numero} de *THE GARAGE*.`,
+    vehiculo ? `Vehículo: ${[vehiculo.marca, vehiculo.referencia, vehiculo.placa].filter(Boolean).join(" ")}` : "",
+    "",
+    ...items.map((i) => `• ${i.descripcion} x${Number(i.cantidad)} — ${pesos(Number(i.cantidad) * Number(i.precio_unitario))}`),
+    "",
+    Number(doc.descuento) ? `Descuento: ${pesos(doc.descuento)}` : "",
+    `*Total: ${pesos(doc.total)}*`,
+    esFactura && pagado ? `Abonado: ${pesos(pagado)}` : "",
+    esFactura && saldo > 0 ? `*Saldo pendiente: ${pesos(saldo)}*` : "",
+    esFactura && doc.fecha_entrega ? `Fecha de entrega: ${fechaCorta(doc.fecha_entrega)}` : "",
+    !esFactura && doc.valida_hasta ? `Cotización válida hasta el ${fechaCorta(doc.valida_hasta)}.` : "",
+    "",
+    "Cualquier duda nos cuentas. ¡Gracias por confiar en nosotros!"
+  ].filter((x) => x !== "");
+
+  const texto = encodeURIComponent(lineas.join("\n"));
+  const tel = telefonoWhatsapp(cliente?.telefono);
+  const url = tel ? `https://wa.me/${tel}?text=${texto}` : `https://wa.me/?text=${texto}`;
+  const v = window.open(url, "_blank");
+  if (!v) return toast("Tu navegador bloqueó la ventana. Permite las ventanas emergentes.", "error");
+  if (!tel) toast("El cliente no tiene teléfono guardado: elige el contacto en WhatsApp.");
 }
 
 // ---------- Impresión ----------
@@ -3498,8 +3559,19 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
     selVeh.innerHTML = `<option value="">—</option>` + autos.map((v) =>
       `<option value="${v.id}" ${p?.vehiculo_id === v.id ? "selected" : ""}>${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</option>`).join("");
   };
+  const campoTitulo = $("[name=titulo]", modal.form);
+  let tituloTocado = !!p;
+  campoTitulo.addEventListener("input", () => { tituloTocado = true; });
+  const sugerirTitulo = () => {
+    if (tituloTocado) return;
+    const v = vehiculos.find((x) => String(x.id) === selVeh.value);
+    const c = clientes.find((x) => String(x.id) === selCli.value);
+    const partes = [v ? [v.marca, v.referencia, v.placa].filter(Boolean).join(" ") : "", c ? c.nombre : ""].filter(Boolean);
+    campoTitulo.value = partes.join(" · ");
+  };
   pintarAutos();
-  selCli.addEventListener("change", pintarAutos);
+  selCli.addEventListener("change", () => { pintarAutos(); sugerirTitulo(); });
+  selVeh.addEventListener("change", sugerirTitulo);
 }
 
 // ---------- Arranque ----------

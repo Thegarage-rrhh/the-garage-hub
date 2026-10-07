@@ -1952,8 +1952,7 @@ async function vistaPrecios(el) {
     esAdmin ? `<button class="btn btn-rojo" id="nuevo-serv">+ Agregar servicio o producto</button>` : "") +
     `<div class="panel">
       ${barraBusqueda("q-pre", "Buscar servicio o producto…",
-        `<select id="f-tipo-serv"><option value="">Servicios y productos</option><option>Servicio</option><option>Producto</option></select>
-         <select id="f-cat-serv"><option value="">Todas las categorías</option>${ops("servicio_categoria").map((v) => `<option>${esc(v)}</option>`).join("")}</select>`)}
+        `<select id="f-tipo-serv"></select><select id="f-cat-serv"></select>`)}
       <div class="tabla-wrap" id="t-pre"><p class="vacio">Cargando…</p></div>
     </div>`;
 
@@ -1965,12 +1964,28 @@ async function vistaPrecios(el) {
   const data = cat.data, precios = pv.data || [];
   const tipos = ops("tipo_vehiculo");
   const recargar = () => vistaPrecios(el);
+  const visibles = data.filter((s) => esAdmin || s.activo);
+
+  // Los filtros solo muestran lo que de verdad existe, y se ajustan entre ellos
+  const pintarFiltros = () => {
+    const selTipo = $("#f-tipo-serv", el), selCat = $("#f-cat-serv", el);
+    const tipoSel = selTipo.value, catSel = selCat.value;
+    const tiposCon = [...new Set(visibles.map((s) => s.tipo).filter(Boolean))].sort();
+    const catsCon = [...new Set(visibles.filter((s) => !tipoSel || s.tipo === tipoSel).map((s) => s.categoria).filter(Boolean))].sort();
+    const cuenta = (f) => visibles.filter(f).length;
+    selTipo.innerHTML = `<option value="">Todo (${visibles.length})</option>` +
+      tiposCon.map((t) => `<option value="${esc(t)}" ${t === tipoSel ? "selected" : ""}>${esc(t)}s (${cuenta((s) => s.tipo === t)})</option>`).join("");
+    selCat.innerHTML = `<option value="">Todas las categorías</option>` +
+      catsCon.map((c) => `<option value="${esc(c)}" ${c === catSel ? "selected" : ""}>${esc(c)} (${cuenta((s) => s.categoria === c && (!tipoSel || s.tipo === tipoSel))})</option>`).join("");
+    if (catSel && !catsCon.includes(catSel)) selCat.value = "";
+  };
   const precioDe = (id, tipo) => precios.find((x) => x.catalogo_id === id && x.tipo_vehiculo === tipo);
 
   const pintar = () => {
+    pintarFiltros();
     const q = $("#q-pre", el).value, tipo = $("#f-tipo-serv", el).value, cate = $("#f-cat-serv", el).value;
-    const lista = data.filter((s) => coincide([s.nombre, s.categoria, s.descripcion].filter(Boolean).join(" "), q) &&
-      (!tipo || s.tipo === tipo) && (!cate || s.categoria === cate) && (esAdmin || s.activo));
+    const lista = visibles.filter((s) => coincide([s.nombre, s.categoria, s.descripcion].filter(Boolean).join(" "), q) &&
+      (!tipo || s.tipo === tipo) && (!cate || s.categoria === cate));
     $("#t-pre", el).innerHTML = !lista.length
       ? `<p class="vacio">No hay servicios ni productos que coincidan. ${esAdmin ? "Agrega el primero." : ""}</p>`
       : `<table><thead><tr><th>Servicio o producto</th><th>Categoría</th>
@@ -1991,7 +2006,7 @@ async function vistaPrecios(el) {
           </div></td>` : ""}
         </tr>`).join("")}
       </tbody></table>
-      <p class="ayuda" style="margin-top:1rem">El precio de <b>Automóvil</b> es el precio base. Los tipos de vehículo en gris usan ese mismo valor porque no tienen un precio propio; los que están en blanco sí lo tienen.</p>`;
+      <p class="ayuda" style="margin-top:1rem">${lista.length} de ${visibles.length} · El precio de <b>Automóvil</b> es el precio base. Los tipos de vehículo en gris usan ese mismo valor porque no tienen un precio propio; los que están en blanco sí lo tienen.</p>`;
   };
   pintar();
 

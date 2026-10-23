@@ -93,7 +93,7 @@ const MENU = {
       { id: "tareas", label: "Tareas", listo: true } ] },
     { grupo: "Operación", items: [
       { id: "inventarios", label: "Inventarios", listo: true },
-      { id: "agenda", label: "Agenda de entregas", fase: 7 } ] },
+      { id: "agenda", label: "Agenda de entregas", listo: true } ] },
     { grupo: "Comercial", items: [
       { id: "clientes", label: "Clientes", listo: true },
       { id: "proveedores", label: "Proveedores", listo: true },
@@ -120,7 +120,8 @@ const MENU = {
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
   inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
-  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion, contabilidad: vistaContabilidad, reportes: vistaReportes, rentabilidad: vistaRentabilidad };
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion, contabilidad: vistaContabilidad, reportes: vistaReportes, rentabilidad: vistaRentabilidad,
+  agenda: vistaAgendaEntregas };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -4162,6 +4163,203 @@ async function modalDetalleRentabilidad(p, c, datos, alCambiar) {
     });
   };
   pintar();
+}
+
+// =====================================================
+//  FASE 7 · AGENDA DE ENTREGAS
+// =====================================================
+let vistaAgenda = "mes";
+let fechaAgenda = null;
+
+const DIAS_SEMANA = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+
+const primerDiaMes = (iso) => iso.slice(0, 8) + "01";
+const ultimoDiaMes = (iso) => {
+  const [a, m] = iso.split("-").map(Number);
+  return new Date(a, m, 0).toLocaleDateString("en-CA");
+};
+const mismoMes = (a, b) => a.slice(0, 7) === b.slice(0, 7);
+
+// Devuelve los 42 días de la cuadrícula mensual (empezando en lunes)
+function diasDelMes(iso) {
+  const inicio = lunesDe(primerDiaMes(iso));
+  return Array.from({ length: 42 }, (_, i) => sumarDias(inicio, i));
+}
+
+async function cargarEventos(desde, hasta) {
+  const [fac, pro, tar, cli, veh, per] = await Promise.all([
+    sb.from("facturas").select("*").not("fecha_entrega", "is", null)
+      .gte("fecha_entrega", desde).lte("fecha_entrega", hasta).neq("estado_pago", "anulada"),
+    sb.from("proyectos").select("*").not("fecha_entrega", "is", null)
+      .gte("fecha_entrega", desde).lte("fecha_entrega", hasta),
+    sb.from("tareas").select("*").gte("fecha", desde).lte("fecha", hasta),
+    sb.from("clientes").select("id,nombre,telefono"),
+    sb.from("vehiculos").select("*"),
+    sb.from("perfiles").select("id,nombre,email")
+  ]);
+  const clientes = cli.data || [], vehiculos = veh.data || [], personas = per.data || [];
+  const nombreCli = (id) => clientes.find((c) => c.id === id)?.nombre || "Sin cliente";
+  const nombreVeh = (id) => {
+    const v = vehiculos.find((x) => x.id === id);
+    return v ? [v.marca, v.referencia, v.placa].filter(Boolean).join(" ") : "";
+  };
+
+  const eventos = [];
+  (pro.data || []).forEach((p) => eventos.push({
+    tipo: "orden", fecha: p.fecha_entrega, id: p.id,
+    titulo: p.titulo, detalle: nombreCli(p.cliente_id),
+    estado: p.estado, listo: ["listo", "entregado"].includes(p.estado),
+    clase: p.estado === "entregado" ? "ev-ok" : p.estado === "listo" ? "ev-ok" : "ev-orden",
+    datos: p
+  }));
+  (fac.data || []).forEach((f) => eventos.push({
+    tipo: "factura", fecha: f.fecha_entrega, id: f.id,
+    titulo: `${numeroDoc(ajustesCache.prefijo_factura, f.id)} · ${nombreCli(f.cliente_id)}`,
+    detalle: nombreVeh(f.vehiculo_id) || f.vehiculo || "",
+    estado: f.estado_trabajo, listo: f.estado_trabajo === "entregado",
+    clase: f.estado_trabajo === "entregado" ? "ev-ok" : "ev-factura",
+    datos: f
+  }));
+  (tar.data || []).forEach((t) => eventos.push({
+    tipo: "tarea", fecha: t.fecha, id: t.id,
+    titulo: t.titulo, detalle: personas.find((p) => p.id === t.empleado_id)?.nombre || "Sin asignar",
+    estado: t.estado, listo: t.estado === "terminada",
+    clase: t.estado === "terminada" ? "ev-ok" : "ev-tarea",
+    datos: t
+  }));
+  return { eventos, clientes, vehiculos, personas };
+}
+
+async function vistaAgendaEntregas(el) {
+  if (!fechaAgenda) fechaAgenda = hoyISO();
+  await cargarAjustes();
+  const hoy = hoyISO();
+
+  const titulo = vistaAgenda === "mes" ? NOMBRE_MES(fechaAgenda.slice(0, 7))
+    : vistaAgenda === "semana" ? `Semana del ${fechaCorta(lunesDe(fechaAgenda))} al ${fechaCorta(sumarDias(lunesDe(fechaAgenda), 6))}`
+    : fechaCorta(fechaAgenda);
+
+  el.innerHTML = encabezado("Agenda de entregas", titulo.charAt(0).toUpperCase() + titulo.slice(1),
+    `<div class="acciones">
+      <button class="btn btn-chico" data-nav="-1">←</button>
+      <button class="btn btn-chico" data-nav="0">Hoy</button>
+      <button class="btn btn-chico" data-nav="1">→</button>
+      <div class="pestanas pestanas-chicas">
+        ${[["mes", "Mes"], ["semana", "Semana"], ["dia", "Día"]].map(([k, v]) =>
+          `<button class="pestana ${vistaAgenda === k ? "activa" : ""}" data-vis="${k}">${v}</button>`).join("")}
+      </div>
+    </div>`) + `<div id="agenda-cont"><p class="vacio">Cargando…</p></div>`;
+
+  $(".titulo-pagina .acciones", el).addEventListener("click", (e) => {
+    const nav = e.target.closest("[data-nav]"), vis = e.target.closest("[data-vis]");
+    if (nav) {
+      const n = Number(nav.dataset.nav);
+      if (n === 0) fechaAgenda = hoy;
+      else if (vistaAgenda === "mes") {
+        const [a, m] = fechaAgenda.split("-").map(Number);
+        const d = new Date(a, m - 1 + n, 1);
+        fechaAgenda = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+      } else fechaAgenda = sumarDias(fechaAgenda, vistaAgenda === "semana" ? n * 7 : n);
+      vistaAgendaEntregas(el);
+    }
+    if (vis) { vistaAgenda = vis.dataset.vis; vistaAgendaEntregas(el); }
+  });
+
+  const desde = vistaAgenda === "mes" ? diasDelMes(fechaAgenda)[0]
+    : vistaAgenda === "semana" ? lunesDe(fechaAgenda) : fechaAgenda;
+  const hasta = vistaAgenda === "mes" ? diasDelMes(fechaAgenda)[41]
+    : vistaAgenda === "semana" ? sumarDias(lunesDe(fechaAgenda), 6) : fechaAgenda;
+
+  const { eventos } = await cargarEventos(desde, hasta);
+  const deDia = (f) => eventos.filter((e) => e.fecha === f);
+  const cont = $("#agenda-cont", el);
+
+  // ---------- Resumen de pendientes ----------
+  const pendientes = eventos.filter((e) => !e.listo && e.tipo !== "tarea");
+  const deHoy = pendientes.filter((e) => e.fecha === hoy);
+
+  // Las entregas atrasadas se cuentan siempre, no solo en el periodo que estás viendo
+  const [proAtr, facAtr] = await Promise.all([
+    sb.from("proyectos").select("id", { count: "exact", head: true })
+      .not("fecha_entrega", "is", null).lt("fecha_entrega", hoy)
+      .not("estado", "in", "(entregado,cancelado)"),
+    sb.from("facturas").select("id", { count: "exact", head: true })
+      .not("fecha_entrega", "is", null).lt("fecha_entrega", hoy)
+      .neq("estado_trabajo", "entregado").neq("estado_pago", "anulada")
+  ]);
+  const atrasados = { length: (proAtr.count || 0) + (facAtr.count || 0) };
+
+  const resumen = `<div class="cifras">
+    <div class="cifra ${atrasados.length ? "cifra-alerta" : ""}"><b>${atrasados.length}</b><span>Entregas atrasadas</span></div>
+    <div class="cifra"><b>${deHoy.length}</b><span>Para entregar hoy</span></div>
+    <div class="cifra"><b>${pendientes.length}</b><span>Pendientes en lo que estás viendo</span></div>
+  </div>`;
+
+  const tarjeta = (ev, compacta = false) => `<button class="evento ${ev.clase}" data-ev="${ev.tipo}|${ev.id}">
+    <b>${esc(ev.titulo)}</b>${compacta ? "" : `<span>${esc(ev.detalle || "")}</span>`}</button>`;
+
+  if (vistaAgenda === "mes") {
+    const dias = diasDelMes(fechaAgenda);
+    cont.innerHTML = resumen + `<div class="panel">
+      <div class="cal-mes">
+        ${DIAS_SEMANA.map((d) => `<div class="cal-cab">${d}</div>`).join("")}
+        ${dias.map((f) => {
+          const evs = deDia(f);
+          const fuera = !mismoMes(f, fechaAgenda);
+          return `<div class="cal-dia ${fuera ? "fuera" : ""} ${f === hoy ? "hoy" : ""}" data-dia="${f}">
+            <span class="cal-num">${Number(f.slice(-2))}</span>
+            ${evs.slice(0, 3).map((e) => tarjeta(e, true)).join("")}
+            ${evs.length > 3 ? `<span class="cal-mas">+${evs.length - 3} más</span>` : ""}
+          </div>`;
+        }).join("")}
+      </div>
+      <p class="ayuda" style="margin-top:1rem">Haz clic en un día para verlo en detalle. Rojo: orden de trabajo · Azul: factura · Gris: tarea · Verde: ya está listo.</p>
+    </div>`;
+    cont.querySelectorAll("[data-dia]").forEach((d) => d.addEventListener("click", (e) => {
+      if (e.target.closest("[data-ev]")) return;
+      fechaAgenda = d.dataset.dia; vistaAgenda = "dia"; vistaAgendaEntregas(el);
+    }));
+  }
+
+  if (vistaAgenda === "semana") {
+    const dias = Array.from({ length: 7 }, (_, i) => sumarDias(lunesDe(fechaAgenda), i));
+    cont.innerHTML = resumen + `<div class="panel"><div class="cal-semana">
+      ${dias.map((f) => {
+        const evs = deDia(f);
+        return `<div class="cal-col ${f === hoy ? "hoy" : ""}">
+          <div class="cal-cab" data-dia="${f}">${DIAS_SEMANA[(new Date(f + "T12:00:00").getDay() + 6) % 7]} ${Number(f.slice(-2))}</div>
+          ${evs.map((e) => tarjeta(e)).join("") || `<span class="cal-vacio">—</span>`}
+        </div>`;
+      }).join("")}
+    </div></div>`;
+  }
+
+  if (vistaAgenda === "dia") {
+    const evs = deDia(fechaAgenda);
+    const porTipo = (t) => evs.filter((e) => e.tipo === t);
+    const bloque = (titulo, lista, vacio) => `<div class="panel">
+      <h2>${titulo} ${lista.length ? `<span class="chip">${lista.length}</span>` : ""}</h2>
+      ${lista.length ? `<div class="lista-eventos">${lista.map((e) => `
+        <button class="evento grande ${e.clase}" data-ev="${e.tipo}|${e.id}">
+          <b>${esc(e.titulo)}</b><span>${esc(e.detalle || "")}</span>
+          <span class="chip ${e.listo ? "chip-ok" : "chip-aviso"}">${esc(String(e.estado).replace("_", " "))}</span>
+        </button>`).join("")}</div>` : `<p class="vacio">${vacio}</p>`}
+    </div>`;
+    cont.innerHTML = resumen +
+      bloque("Órdenes de trabajo a entregar", porTipo("orden"), "Nada para entregar este día.") +
+      bloque("Facturas con entrega", porTipo("factura"), "Sin facturas con entrega este día.") +
+      bloque("Tareas del día", porTipo("tarea"), "Sin tareas asignadas este día.");
+  }
+
+  // Ir al detalle de lo que se haga clic
+  cont.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-ev]");
+    if (!b) return;
+    const [tipo] = b.dataset.ev.split("|");
+    if (tipo === "orden") { tabTareas = "proyectos"; location.hash = "tareas"; }
+    if (tipo === "factura") { tabFactura = "facturas"; location.hash = "facturacion"; }
+    if (tipo === "tarea") { tabTareas = "dia"; diaTareas = fechaAgenda; location.hash = "tareas"; }
+  });
 }
 
 // ---------- Arranque ----------

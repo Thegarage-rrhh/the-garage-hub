@@ -101,6 +101,8 @@ const MENU = {
     { grupo: "Dinero", items: [
       { id: "facturacion", label: "Facturación", listo: true },
       { id: "contabilidad", label: "Contabilidad", listo: true },
+      { id: "rentabilidad", label: "Rentabilidad por orden", listo: true },
+      { id: "reportes", label: "Reportes", listo: true },
       { id: "cuentas", label: "Cuentas de dinero", listo: true } ] }
   ],
   empleado: [
@@ -118,7 +120,7 @@ const MENU = {
 
 const VISTAS = { inicio: vistaInicio, empleados: vistaEmpleados, cuentas: vistaCuentas, jornada: vistaJornada, asistencia: vistaAsistencia, tareas: vistaTareasAdmin, "mis-tareas": vistaMisTareas,
   inventarios: vistaInventarios, inventario: vistaInventarioEmpleado, moldes: vistaMoldesEmpleado,
-  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion, contabilidad: vistaContabilidad };
+  clientes: vistaClientes, proveedores: vistaProveedores, precios: vistaPrecios, cuenta: vistaCuenta, facturacion: vistaFacturacion, contabilidad: vistaContabilidad, reportes: vistaReportes, rentabilidad: vistaRentabilidad };
 
 // ---------- Sesión ----------
 async function iniciar() {
@@ -326,6 +328,7 @@ function formEmpleado(p = null) {
         <div class="campo"><label>Documento</label><input name="documento" value="${v("documento")}"></div>
         <div class="campo"><label>Teléfono</label><input name="telefono" type="tel" value="${v("telefono")}"></div>
         <div class="campo"><label>Fecha de ingreso</label><input name="fecha_ingreso" type="date" value="${v("fecha_ingreso")}"></div>
+        <div class="campo"><label>Costo por hora</label><input type="number" step="500" min="0" name="costo_hora" value="${Number(p?.costo_hora) || 0}"></div>
         <div class="campo"><label>Rol en el HUB</label><select name="rol">
           <option value="empleado" ${p?.rol !== "admin" ? "selected" : ""}>Empleado</option>
           <option value="admin" ${p?.rol === "admin" ? "selected" : ""}>Administrador</option></select></div>
@@ -343,7 +346,8 @@ function formEmpleado(p = null) {
       }
       const datos = {
         nombre: d.nombre.trim(), cargo: d.cargo.trim() || null, documento: d.documento.trim() || null,
-        telefono: d.telefono.trim() || null, fecha_ingreso: d.fecha_ingreso || null, rol: d.rol
+        telefono: d.telefono.trim() || null, fecha_ingreso: d.fecha_ingreso || null, rol: d.rol,
+        costo_hora: Number(d.costo_hora) || 0
       };
       let id = p?.id;
       if (nuevo) {
@@ -908,6 +912,7 @@ async function cargarTareas(filtro) {
 
 // ---------- Vista empleado: Mis tareas ----------
 async function vistaMisTareas(el, conEncabezado = true) {
+  await cargarOpciones();
   if (conEncabezado) el.innerHTML = encabezado("Mis tareas", "Inicia y termina tus tareas para llevar el tiempo real.");
   const cont = document.createElement("div");
   cont.innerHTML = `<p class="vacio">Cargando…</p>`;
@@ -946,6 +951,10 @@ async function vistaMisTareas(el, conEncabezado = true) {
             ${t.fecha !== hoy ? `<span class="chip chip-aviso">De ${fechaCorta(t.fecha)}</span>` : ""}
             ${t.minutos_estimados ? `<span class="chip">Estimado: ${duracion(t.minutos_estimados)}</span>` : ""}
             <span class="chip ${atrasada ? "chip-alerta" : ""}">Real: <b data-tiempo="${t.id}">${duracion(min)}</b></span>
+            ${(() => {
+              const ultimo = tramosDe(t.id).filter((x) => x.fin && x.motivo_pausa && x.motivo_pausa !== "auto").pop();
+              return t.estado === "pausada" && ultimo ? `<span class="chip chip-aviso">Pausada: ${esc(ultimo.motivo_pausa)}</span>` : "";
+            })()}
           </div>
         </div>
         <div class="tarea-acciones">
@@ -982,23 +991,55 @@ async function vistaMisTareas(el, conEncabezado = true) {
   if (intervaloTareas) clearInterval(intervaloTareas);
   intervaloTareas = setInterval(refrescar, 1000);
 
+  const cerrarTramo = async (id, motivo, estado) => {
+    const cierre = await sb.from("tarea_tiempos")
+      .update({ fin: new Date().toISOString(), motivo_pausa: motivo }).eq("tarea_id", Number(id)).is("fin", null);
+    if (cierre.error) return cierre.error;
+    const r = await sb.from("tareas").update({ estado }).eq("id", Number(id));
+    return r.error;
+  };
+
   cont.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-tarea]");
     if (!b) return;
     const [accion, id] = b.dataset.tarea.split("|");
+
+    if (accion === "pausar") return modalPausa(id);
+
     b.disabled = true;
     let error = null;
     if (accion === "iniciar") {
       ({ error } = await sb.from("tarea_tiempos").insert({ tarea_id: Number(id) }));
     } else {
-      const cierre = await sb.from("tarea_tiempos").update({ fin: new Date().toISOString() }).eq("tarea_id", Number(id)).is("fin", null);
-      error = cierre.error;
-      if (!error) ({ error } = await sb.from("tareas").update({ estado: accion === "terminar" ? "terminada" : "pausada" }).eq("id", Number(id)));
+      error = await cerrarTramo(id, "Trabajo terminado", "terminada");
     }
     if (error) { b.disabled = false; return toast(traducirError(error), "error"); }
-    toast(accion === "iniciar" ? "Cronómetro iniciado" : accion === "pausar" ? "Tarea pausada" : "¡Tarea terminada!");
+    toast(accion === "iniciar" ? "Cronómetro iniciado" : "¡Tarea terminada!");
     navegar();
   });
+
+  // Al pausar se pregunta por qué: así se sabe en qué se va el tiempo muerto
+  function modalPausa(id) {
+    const motivos = ops("motivo_pausa");
+    abrirModal({
+      titulo: "¿Por qué pausas la tarea?",
+      botonTexto: "Pausar tarea",
+      cuerpo: `<p class="ayuda">Esto queda registrado para saber cuánto tiempo se va en interrupciones.</p>
+        <div class="campo"><label>Motivo *</label><select name="motivo" required>
+          ${motivos.map((m) => `<option>${esc(m)}</option>`).join("")}
+        </select></div>
+        <div class="campo"><label>Detalle (opcional)</label>
+          <input name="detalle" placeholder="Ej: fui a comprar hilo negro"></div>`,
+      alGuardar: async (d) => {
+        const motivo = [d.motivo, d.detalle.trim()].filter(Boolean).join(" · ");
+        const error = await cerrarTramo(id, motivo, "pausada");
+        if (error) { toast(traducirError(error), "error"); return false; }
+        toast("Tarea pausada · " + d.motivo);
+        navegar();
+        return true;
+      }
+    });
+  }
 }
 
 // ---------- Vista admin: Tareas ----------
@@ -1364,7 +1405,7 @@ async function modalVenderProducto(p, alCambiar) {
 
       const { error: e2 } = await sb.from("factura_items").insert({
         factura_id: fac.id, descripcion: `${nombre}${p.anio ? " " + p.anio : ""}${p.material ? " · " + p.material : ""}`,
-        categoria: p.categoria, cantidad, precio_unitario: precio, costo_unitario: Number(p.costo) || 0
+        categoria: p.categoria, material: p.material || null, cantidad, precio_unitario: precio, costo_unitario: Number(p.costo) || 0
       });
       if (e2) { toast(traducirError(e2), "error"); return false; }
 
@@ -1722,10 +1763,18 @@ async function vistaClientes(el) {
       <div class="tabla-wrap" id="t-cli"><p class="vacio">Cargando…</p></div>
     </div>`;
 
-  const [cli, veh] = await Promise.all([
+  const [cli, veh, fac] = await Promise.all([
     sb.from("clientes").select("*").order("nombre"),
-    sb.from("vehiculos").select("*")
+    sb.from("vehiculos").select("*"),
+    sb.from("facturas").select("cliente_id,fecha,total").neq("estado_pago", "anulada")
   ]);
+  const compras = {};
+  (fac.data || []).forEach((f) => {
+    if (!f.cliente_id) return;
+    compras[f.cliente_id] = compras[f.cliente_id] || { fechas: [], total: 0 };
+    compras[f.cliente_id].fechas.push(f.fecha);
+    compras[f.cliente_id].total += Number(f.total);
+  });
   if (cli.error) { $("#t-cli", el).innerHTML = `<p class="vacio">${esc(traducirError(cli.error))}</p>`; return; }
   const data = cli.data, vehiculos = veh.data || [];
   const recargar = () => vistaClientes(el);
@@ -1740,15 +1789,18 @@ async function vistaClientes(el) {
     });
     $("#t-cli", el).innerHTML = !lista.length
       ? `<p class="vacio">No hay clientes que coincidan.</p>`
-      : `<table><thead><tr><th>Cliente</th><th>Documento</th><th>Contacto</th><th>Vehículos</th><th>Canal</th><th></th></tr></thead><tbody>
+      : `<table><thead><tr><th>Cliente</th><th>Contacto</th><th>Vehículos</th><th>Compras</th><th>Frecuencia</th><th></th></tr></thead><tbody>
         ${lista.map((c) => `<tr>
-          <td><b>${esc(c.nombre)}</b>${c.ciudad ? `<span class="sub">${esc(c.ciudad)}</span>` : ""}</td>
-          <td>${esc([c.tipo_documento, c.documento].filter(Boolean).join(" ") || "—")}</td>
+          <td><b>${esc(c.nombre)}</b><span class="sub">${esc([c.tipo_documento, c.documento].filter(Boolean).join(" ") || c.ciudad || "")}</span>
+            ${Number(c.descuento_porcentaje) ? ` <span class="chip chip-ok">${Number(c.descuento_porcentaje)}% dcto</span>` : ""}</td>
           <td>${esc(c.telefono || "—")}${c.email ? `<span class="sub">${esc(c.email)}</span>` : ""}</td>
           <td><div class="chips">${autosDe(c.id).map((v) => `<span class="chip">${esc([v.marca, v.referencia].filter(Boolean).join(" "))}${v.placa ? ` · ${esc(v.placa)}` : ""}</span>`).join("") || "—"}</div></td>
-          <td>${esc(c.canal_origen || "—")}</td>
+          <td>${compras[c.id] ? `${compras[c.id].fechas.length}<span class="sub">${pesos(compras[c.id].total)}</span>` : "—"}</td>
+          <td>${(() => { const fr = frecuenciaCliente(compras[c.id]?.fechas || []);
+            return fr.visitas ? `<span class="chip ${fr.clase}">${fr.etiqueta}</span>${fr.dias ? `<span class="sub">cada ${fr.dias} días</span>` : ""}` : `<span class="sub">Sin compras</span>`; })()}</td>
           <td><div class="acciones">
-            <button class="btn btn-chico btn-rojo" data-acc="autos|${c.id}">Vehículos</button>
+            <button class="btn btn-chico btn-rojo" data-acc="historial|${c.id}">Historial</button>
+            <button class="btn btn-chico" data-acc="autos|${c.id}">Vehículos</button>
             <button class="btn btn-chico" data-acc="editar|${c.id}">Editar</button>
             <button class="btn btn-chico btn-texto" data-acc="borrar|${c.id}">Eliminar</button>
           </div></td></tr>`).join("")}
@@ -1766,6 +1818,7 @@ async function vistaClientes(el) {
     const c = data.find((x) => String(x.id) === id);
     if (accion === "editar") formCliente(c, recargar);
     if (accion === "autos") modalVehiculos(c, recargar);
+    if (accion === "historial") modalHistorialCliente(c);
     if (accion === "borrar") {
       if (!confirm(`¿Eliminar a "${c.nombre}"? También se borran sus vehículos registrados.`)) return;
       const { error } = await sb.from("clientes").delete().eq("id", c.id);
@@ -1789,6 +1842,7 @@ function formCliente(c, alGuardar) {
         <div class="campo"><label>Ciudad</label><input name="ciudad" value="${v("ciudad")}"></div>
         <div class="campo"><label>Dirección</label><input name="direccion" value="${v("direccion")}"></div>
         <div class="campo"><label>¿Cómo nos conoció?</label>${selectOps("canal_origen", "canal_origen", c?.canal_origen)}</div>
+        <div class="campo"><label>Descuento fijo (%)</label><input type="number" step="0.5" min="0" max="50" name="descuento_porcentaje" value="${Number(c?.descuento_porcentaje) || 0}"></div>
       </div>
       <div class="campo"><label>Notas</label><input name="notas" placeholder="Preferencias, acuerdos, observaciones…" value="${v("notas")}"></div>
       ${nuevo ? `<p class="ayuda">Después de crearlo puedes agregarle sus vehículos con el botón "Vehículos".</p>` : ""}`,
@@ -1796,7 +1850,8 @@ function formCliente(c, alGuardar) {
       const datos = {
         nombre: d.nombre.trim(), tipo_documento: d.tipo_documento || null, documento: d.documento.trim() || null,
         telefono: d.telefono.trim() || null, email: d.email.trim() || null, ciudad: d.ciudad.trim() || null,
-        direccion: d.direccion.trim() || null, canal_origen: d.canal_origen || null, notas: d.notas.trim() || null
+        direccion: d.direccion.trim() || null, canal_origen: d.canal_origen || null, notas: d.notas.trim() || null,
+        descuento_porcentaje: Number(d.descuento_porcentaje) || 0
       };
       const { error } = nuevo ? await sb.from("clientes").insert(datos) : await sb.from("clientes").update(datos).eq("id", c.id);
       if (error) { toast(traducirError(error), "error"); return false; }
@@ -2241,7 +2296,7 @@ async function vistaFacturacion(el) {
 // ---------- Datos compartidos por los formularios ----------
 async function datosDocumento() {
   const [cli, veh, cat, pv, cue, ab] = await Promise.all([
-    sb.from("clientes").select("id,nombre,telefono").order("nombre"),
+    sb.from("clientes").select("id,nombre,telefono,descuento_porcentaje").order("nombre"),
     sb.from("vehiculos").select("*"),
     sb.from("catalogo").select("*").eq("activo", true).order("nombre"),
     sb.from("precios_vehiculo").select("*"),
@@ -2472,7 +2527,8 @@ function formDocumento(tipo, existente, datos, alGuardar) {
       const filasGuardar = items.map((i) => ({
         [llave]: idDoc, catalogo_id: i.catalogo_id || null, descripcion: i.descripcion,
         categoria: i.categoria || null, cantidad: i.cantidad,
-        precio_unitario: i.precio_unitario, costo_unitario: i.costo_unitario || 0
+        precio_unitario: i.precio_unitario, costo_unitario: i.costo_unitario || 0,
+        ...(esFactura ? { material: i.material || null } : {})
       }));
       const { error: e2 } = await sb.from(tablaItems).insert(filasGuardar);
       if (e2) { toast(traducirError(e2), "error"); return false; }
@@ -2501,6 +2557,18 @@ function formDocumento(tipo, existente, datos, alGuardar) {
 
   // ----- Vehículos según el cliente -----
   const selCliente = $("[name=cliente_id]", form), selVeh = $("[name=vehiculo_id]", form);
+  let descuentoTocado = !!doc;
+  $("[name=descuento]", form).addEventListener("input", () => { descuentoTocado = true; });
+  const aplicarDescuentoCliente = () => {
+    if (descuentoTocado) return;
+    const c = datos.clientes.find((x) => String(x.id) === selCliente.value);
+    const pct = Number(c?.descuento_porcentaje) || 0;
+    if (!pct) return;
+    const sub = filas.reduce((s, f) => s + Number(f.cantidad || 0) * Number(f.precio_unitario || 0), 0);
+    $("[name=descuento]", form).value = Math.round(sub * pct / 100);
+    toast(`${c.nombre} tiene ${pct}% de descuento fijo`);
+    pintarTotales();
+  };
   const pintarVehiculos = () => {
     const id = Number(selCliente.value);
     const autos = datos.vehiculos.filter((v) => v.cliente_id === id);
@@ -2508,7 +2576,7 @@ function formDocumento(tipo, existente, datos, alGuardar) {
       `<option value="${v.id}" data-tipo="${esc(v.tipo || "")}" ${doc?.vehiculo_id === v.id ? "selected" : ""}>${esc([v.marca, v.referencia, v.placa].filter(Boolean).join(" "))}</option>`).join("");
   };
   pintarVehiculos();
-  selCliente.addEventListener("change", pintarVehiculos);
+  selCliente.addEventListener("change", () => { pintarVehiculos(); aplicarDescuentoCliente(); });
   selVeh.addEventListener("change", () => {
     const tipo = selVeh.selectedOptions[0]?.dataset.tipo;
     if (tipo) { $("[name=tipo_vehiculo]", form).value = tipo; pintarFilas(); }
@@ -3587,6 +3655,513 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
   pintarAutos();
   selCli.addEventListener("change", () => { pintarAutos(); sugerirTitulo(); });
   selVeh.addEventListener("change", sugerirTitulo);
+}
+
+// =====================================================
+//  REPORTES · ¿cómo se está moviendo el negocio?
+// =====================================================
+let periodoRep = "3m";
+let criterioRep = "marca";
+let medidaRep = "ventas";
+
+const PERIODOS = { mes: "Este mes", "3m": "Últimos 3 meses", "12m": "Últimos 12 meses", todo: "Todo el histórico" };
+const CRITERIOS = {
+  marca: "Marca del vehículo", referencia: "Modelo del vehículo", tipo_vehiculo: "Tipo de vehículo",
+  servicio: "Servicio o producto", categoria: "Categoría", material: "Material",
+  cliente: "Cliente", canal: "Cómo nos conoció"
+};
+const MEDIDAS = { ventas: "Ventas ($)", cantidad: "Cantidad (#)", ganancia: "Ganancia ($)" };
+
+function desdePeriodo(p) {
+  const hoy = hoyISO();
+  if (p === "mes") return hoy.slice(0, 7) + "-01";
+  if (p === "3m") return sumarDias(hoy, -90);
+  if (p === "12m") return sumarDias(hoy, -365);
+  return "2000-01-01";
+}
+
+// Frecuencia de compra de un cliente
+function frecuenciaCliente(fechas) {
+  if (!fechas.length) return { visitas: 0, etiqueta: "Sin compras", clase: "", dias: null, ultima: null };
+  const unicas = [...new Set(fechas)].sort();
+  const ultima = unicas.at(-1);
+  const diasDesde = Math.round((new Date(hoyISO()) - new Date(ultima)) / 86400000);
+  if (unicas.length === 1) {
+    return { visitas: 1, etiqueta: diasDesde > 180 ? "Inactivo" : "Primera compra", clase: diasDesde > 180 ? "chip-alerta" : "", dias: null, ultima, diasDesde };
+  }
+  const rango = (new Date(ultima) - new Date(unicas[0])) / 86400000;
+  const dias = Math.round(rango / (unicas.length - 1));
+  let etiqueta = "Esporádico", clase = "";
+  if (dias <= 15) { etiqueta = "Muy frecuente"; clase = "chip-ok"; }
+  else if (dias <= 45) { etiqueta = "Frecuente"; clase = "chip-ok"; }
+  else if (dias <= 120) { etiqueta = "Ocasional"; clase = "chip-aviso"; }
+  if (diasDesde > dias * 3 && diasDesde > 90) { etiqueta = "Se está perdiendo"; clase = "chip-alerta"; }
+  return { visitas: unicas.length, etiqueta, clase, dias, ultima, diasDesde };
+}
+
+async function vistaReportes(el) {
+  await cargarOpciones();
+  const desde = desdePeriodo(periodoRep);
+
+  el.innerHTML = encabezado("Reportes", "Qué se mueve más, quién compra y cada cuánto vuelve.") +
+    `<div class="panel">
+      <div class="barra-inv">
+        <select id="r-periodo">${Object.entries(PERIODOS).map(([k, v]) => `<option value="${k}" ${periodoRep === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <select id="r-criterio">${Object.entries(CRITERIOS).map(([k, v]) => `<option value="${k}" ${criterioRep === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <select id="r-medida">${Object.entries(MEDIDAS).map(([k, v]) => `<option value="${k}" ${medidaRep === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      </div>
+      <div id="r-grafico"><p class="vacio">Cargando…</p></div>
+    </div>
+    <div id="r-clientes"></div>`;
+
+  ["r-periodo", "r-criterio", "r-medida"].forEach((id) => {
+    $("#" + id, el).addEventListener("change", () => {
+      periodoRep = $("#r-periodo", el).value;
+      criterioRep = $("#r-criterio", el).value;
+      medidaRep = $("#r-medida", el).value;
+      vistaReportes(el);
+    });
+  });
+
+  const [fac, ite, cli, veh] = await Promise.all([
+    sb.from("facturas").select("*").gte("fecha", desde).neq("estado_pago", "anulada"),
+    sb.from("factura_items").select("*"),
+    sb.from("clientes").select("*"),
+    sb.from("vehiculos").select("*")
+  ]);
+  if (fac.error) { $("#r-grafico", el).innerHTML = `<p class="vacio">${esc(traducirError(fac.error))}</p>`; return; }
+  const facturas = fac.data || [], clientes = cli.data || [], vehiculos = veh.data || [];
+  const ids = new Set(facturas.map((f) => f.id));
+  const items = (ite.data || []).filter((i) => ids.has(i.factura_id));
+
+  if (!facturas.length) {
+    $("#r-grafico", el).innerHTML = `<p class="vacio">Todavía no hay facturas en este periodo. Los reportes se llenan con lo que factures.</p>`;
+    return;
+  }
+
+  // ---- Agrupación según el criterio elegido ----
+  const facturaDe = (id) => facturas.find((f) => f.id === id);
+  const grupos = {};
+  const sumar = (llave, venta, costo, cantidad) => {
+    if (!llave) llave = "Sin dato";
+    grupos[llave] = grupos[llave] || { venta: 0, costo: 0, cantidad: 0 };
+    grupos[llave].venta += venta;
+    grupos[llave].costo += costo;
+    grupos[llave].cantidad += cantidad;
+  };
+
+  if (["servicio", "categoria", "material"].includes(criterioRep)) {
+    items.forEach((i) => {
+      const llave = criterioRep === "servicio" ? i.descripcion : criterioRep === "categoria" ? i.categoria : i.material;
+      sumar(llave, Number(i.cantidad) * Number(i.precio_unitario), Number(i.cantidad) * Number(i.costo_unitario || 0), Number(i.cantidad));
+    });
+  } else {
+    facturas.forEach((f) => {
+      const v = vehiculos.find((x) => x.id === f.vehiculo_id);
+      const c = clientes.find((x) => x.id === f.cliente_id);
+      const costo = items.filter((i) => i.factura_id === f.id).reduce((s, i) => s + Number(i.cantidad) * Number(i.costo_unitario || 0), 0);
+      const llave = criterioRep === "marca" ? v?.marca
+        : criterioRep === "referencia" ? (v ? [v.marca, v.referencia].filter(Boolean).join(" ") : null)
+        : criterioRep === "tipo_vehiculo" ? (f.tipo_vehiculo || v?.tipo)
+        : criterioRep === "cliente" ? (c?.nombre || "Venta de mostrador")
+        : c?.canal_origen;
+      sumar(llave, Number(f.total), costo, 1);
+    });
+  }
+
+  const campo = medidaRep === "cantidad" ? "cantidad" : "venta";
+  const lista = Object.entries(grupos).map(([nombre, g]) => ({
+    nombre,
+    valor: medidaRep === "ganancia" ? g.venta - g.costo : g[campo],
+    detalle: medidaRep === "cantidad" ? `${pesos(g.venta)} facturados`
+      : medidaRep === "ganancia" ? `${pesos(g.venta)} vendidos · margen ${g.venta ? porcentaje((g.venta - g.costo) / g.venta * 100) : "0%"}`
+      : `${g.cantidad} ${criterioRep === "servicio" || criterioRep === "categoria" || criterioRep === "material" ? "unidad(es)" : "factura(s)"}`
+  })).sort((a, b) => b.valor - a.valor);
+
+  const total = lista.reduce((s, x) => s + x.valor, 0);
+  const formato = medidaRep === "cantidad" ? (n) => String(Math.round(n)) : pesos;
+  $("#r-grafico", el).innerHTML = `
+    <p class="ayuda">${CRITERIOS[criterioRep]} · ${MEDIDAS[medidaRep]} · ${PERIODOS[periodoRep].toLowerCase()} · total ${formato(total)}</p>
+    ${barras(lista.slice(0, 12).map((x) => ({ ...x, clase: medidaRep === "ganancia" ? "verde" : "" })), formato)}
+    ${lista.length > 12 ? `<p class="ayuda">Mostrando los 12 primeros de ${lista.length}.</p>` : ""}`;
+
+  // ---- Clientes y su frecuencia ----
+  const porCliente = {};
+  facturas.forEach((f) => {
+    if (!f.cliente_id) return;
+    porCliente[f.cliente_id] = porCliente[f.cliente_id] || { fechas: [], total: 0 };
+    porCliente[f.cliente_id].fechas.push(f.fecha);
+    porCliente[f.cliente_id].total += Number(f.total);
+  });
+  const filas = Object.entries(porCliente).map(([id, d]) => {
+    const c = clientes.find((x) => String(x.id) === id);
+    return { cliente: c, total: d.total, ...frecuenciaCliente(d.fechas) };
+  }).sort((a, b) => b.total - a.total);
+
+  $("#r-clientes", el).innerHTML = `<div class="panel">
+    <h2>Clientes · frecuencia de compra</h2>
+    <p class="ayuda">Ordenados por lo que han gastado en el periodo. Con el botón <b>Descuento</b> le fijas un porcentaje que se aplica solo al facturarle.</p>
+    ${!filas.length ? `<p class="vacio">Las ventas de mostrador no quedan asociadas a un cliente.</p>` : `<div class="tabla-wrap"><table>
+      <thead><tr><th>Cliente</th><th>Compras</th><th>Total gastado</th><th>Cada cuánto vuelve</th><th>Última compra</th><th>Descuento</th><th></th></tr></thead>
+      <tbody>${filas.map((f) => `<tr>
+        <td><b>${esc(f.cliente?.nombre || "—")}</b>${f.cliente?.telefono ? `<span class="sub">${esc(f.cliente.telefono)}</span>` : ""}</td>
+        <td>${f.visitas}</td>
+        <td><b>${pesos(f.total)}</b></td>
+        <td><span class="chip ${f.clase}">${f.etiqueta}</span>${f.dias ? `<span class="sub">cada ${f.dias} días</span>` : ""}</td>
+        <td>${fechaCorta(f.ultima)}<span class="sub">hace ${f.diasDesde} día(s)</span></td>
+        <td>${Number(f.cliente?.descuento_porcentaje) ? `<span class="chip chip-ok">${Number(f.cliente.descuento_porcentaje)}%</span>` : "—"}</td>
+        <td><button class="btn btn-chico" data-desc="${f.cliente?.id}">Descuento</button></td>
+      </tr>`).join("")}</tbody></table></div>`}
+  </div>`;
+
+  $("#r-clientes", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-desc]");
+    if (!b) return;
+    const c = clientes.find((x) => String(x.id) === b.dataset.desc);
+    modalDescuento(c, () => vistaReportes(el));
+  });
+}
+
+function modalDescuento(c, alGuardar) {
+  abrirModal({
+    titulo: `Descuento de ${c.nombre}`,
+    botonTexto: "Guardar descuento",
+    cuerpo: `<p class="ayuda">Este porcentaje se propone solo cuando le hagas una factura. Siempre lo puedes cambiar en el momento.</p>
+      <div class="campo"><label>Descuento fijo (%)</label>
+        <input type="number" step="0.5" min="0" max="50" name="descuento_porcentaje" value="${Number(c.descuento_porcentaje) || 0}"></div>`,
+    alGuardar: async (d) => {
+      const { error } = await sb.from("clientes").update({ descuento_porcentaje: Number(d.descuento_porcentaje) || 0 }).eq("id", c.id);
+      if (error) { toast(traducirError(error), "error"); return false; }
+      toast("Descuento guardado");
+      alGuardar();
+      return true;
+    }
+  });
+}
+
+// =====================================================
+//  HISTORIAL DEL CLIENTE Y RENTABILIDAD POR ORDEN
+// =====================================================
+
+// ---------- Historial completo de un cliente ----------
+async function modalHistorialCliente(c) {
+  const { fondo } = abrirModal({
+    titulo: `Historial · ${c.nombre}`,
+    sinPie: true, ancho: true,
+    cuerpo: `<div id="hist-cli"><p class="vacio">Cargando…</p></div>`
+  });
+
+  await cargarAjustes();
+  const [veh, fac, ite, pro, pag] = await Promise.all([
+    sb.from("vehiculos").select("*").eq("cliente_id", c.id),
+    sb.from("facturas").select("*").eq("cliente_id", c.id).order("fecha", { ascending: false }),
+    sb.from("factura_items").select("*"),
+    sb.from("proyectos").select("*").eq("cliente_id", c.id).order("id", { ascending: false }),
+    sb.from("pagos").select("factura_id,monto")
+  ]);
+  const vehiculos = veh.data || [], facturas = (fac.data || []).filter((f) => f.estado_pago !== "anulada");
+  const items = ite.data || [], proyectos = pro.data || [], pagos = pag.data || [];
+  const cont = $("#hist-cli", fondo);
+
+  const total = facturas.reduce((s, f) => s + Number(f.total), 0);
+  const pagado = facturas.reduce((s, f) => s + pagos.filter((p) => p.factura_id === f.id).reduce((a, p) => a + Number(p.monto), 0), 0);
+  const servicios = {};
+  items.filter((i) => facturas.some((f) => f.id === i.factura_id)).forEach((i) => {
+    servicios[i.descripcion] = (servicios[i.descripcion] || 0) + Number(i.cantidad);
+  });
+
+  cont.innerHTML = `
+    <div class="chips">
+      <span class="chip">${facturas.length} trabajo(s)</span>
+      <span class="chip chip-ok">${pesos(total)} facturado</span>
+      ${total - pagado > 0 ? `<span class="chip chip-alerta">${pesos(total - pagado)} por cobrar</span>` : `<span class="chip chip-ok">Al día</span>`}
+      ${c.telefono ? `<span class="chip">${esc(c.telefono)}</span>` : ""}
+    </div>
+
+    <h4 class="subtitulo">Vehículos</h4>
+    ${vehiculos.length ? `<div class="chips">${vehiculos.map((v) => `<span class="chip">${esc([v.tipo, v.marca, v.referencia, v.anio].filter(Boolean).join(" "))}${v.placa ? ` · ${esc(v.placa)}` : ""}</span>`).join("")}</div>`
+      : `<p class="vacio">Sin vehículos registrados.</p>`}
+
+    <h4 class="subtitulo">Trabajos realizados</h4>
+    ${facturas.length ? `<div class="tabla-wrap"><table>
+      <thead><tr><th>Fecha</th><th>N°</th><th>Vehículo</th><th>Servicios</th><th>Total</th><th>Estado</th></tr></thead>
+      <tbody>${facturas.map((f) => {
+        const v = vehiculos.find((x) => x.id === f.vehiculo_id);
+        const mis = items.filter((i) => i.factura_id === f.id);
+        return `<tr>
+          <td>${fechaCorta(f.fecha)}</td>
+          <td><b>${numeroDoc(ajustesCache.prefijo_factura, f.id)}</b></td>
+          <td>${esc(v ? [v.marca, v.referencia, v.placa].filter(Boolean).join(" ") : "—")}</td>
+          <td>${mis.map((i) => esc(i.descripcion)).join(", ") || "—"}</td>
+          <td><b>${pesos(f.total)}</b></td>
+          <td><span class="chip ${f.estado_pago === "pagada" ? "chip-ok" : "chip-alerta"}">${f.estado_pago}</span></td>
+        </tr>`;
+      }).join("")}</tbody></table></div>` : `<p class="vacio">Todavía no tiene trabajos facturados.</p>`}
+
+    ${proyectos.length ? `<h4 class="subtitulo">Órdenes de trabajo</h4>
+      <div class="chips">${proyectos.map((p) => `<span class="chip ${ESTADO_PROYECTO[p.estado]?.clase || ""}">${esc(p.titulo)} · ${ESTADO_PROYECTO[p.estado]?.texto || p.estado}</span>`).join("")}</div>` : ""}
+
+    ${Object.keys(servicios).length ? `<h4 class="subtitulo">Qué le hemos hecho más</h4>
+      ${barras(Object.entries(servicios).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([n, v]) => ({ nombre: n, valor: v })), (n) => `${n} vez(ces)`)}` : ""}`;
+}
+
+// ---------- Rentabilidad por orden de trabajo ----------
+let filtroRent = "abiertas";
+
+async function vistaRentabilidad(el) {
+  el.innerHTML = encabezado("Rentabilidad por orden", "Cuánto tiempo, material y mano de obra se va en cada vehículo.",
+    `<div class="acciones">
+      <select id="f-rent">
+        <option value="abiertas">Órdenes abiertas</option>
+        <option value="todas">Todas</option>
+        <option value="entregado">Entregadas</option>
+      </select>
+    </div>`) + `<div id="rent-datos"><p class="vacio">Cargando…</p></div>`;
+  $("#f-rent", el).value = filtroRent;
+  $("#f-rent", el).addEventListener("change", (e) => { filtroRent = e.target.value; vistaRentabilidad(el); });
+
+  await cargarAjustes();
+  const [pro, tar, tie, per, cos, fac, cli] = await Promise.all([
+    sb.from("proyectos").select("*").order("id", { ascending: false }).limit(200),
+    sb.from("tareas").select("*").not("proyecto_id", "is", null),
+    sb.from("tarea_tiempos").select("*"),
+    sb.from("perfiles").select("id,nombre,email,costo_hora"),
+    sb.from("proyecto_costos").select("*"),
+    sb.from("facturas").select("id,total,cliente_id,estado_pago"),
+    sb.from("clientes").select("id,nombre")
+  ]);
+  if (pro.error) { $("#rent-datos", el).innerHTML = `<p class="vacio">${esc(traducirError(pro.error))}</p>`; return; }
+  const proyectos = pro.data || [], tareas = tar.data || [], tiempos = tie.data || [];
+  const personas = per.data || [], costos = cos.data || [], facturas = fac.data || [], clientes = cli.data || [];
+  const recargar = () => vistaRentabilidad(el);
+
+  const calcular = (p) => {
+    const mis = tareas.filter((t) => t.proyecto_id === p.id);
+    const tramos = tiempos.filter((x) => mis.some((t) => t.id === x.tarea_id));
+    let minutos = 0, manoObra = 0, minutosPausa = 0;
+    tramos.forEach((x) => {
+      const fin = x.fin ? new Date(x.fin) : new Date();
+      const m = (fin - new Date(x.inicio)) / 60000;
+      minutos += m;
+      const persona = personas.find((pp) => pp.id === x.empleado_id);
+      manoObra += m / 60 * Number(persona?.costo_hora || 0);
+    });
+    const materiales = costos.filter((x) => x.proyecto_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
+    const factura = facturas.find((f) => f.id === p.factura_id && f.estado_pago !== "anulada");
+    const ingreso = factura ? Number(factura.total) : Number(p.presupuesto || 0);
+    const costo = materiales + manoObra;
+    return { mis, minutos, manoObra: Math.round(manoObra), materiales, costo: Math.round(costo), ingreso,
+             ganancia: Math.round(ingreso - costo), margen: ingreso ? (ingreso - costo) / ingreso * 100 : null,
+             esPresupuesto: !factura, minutosPausa };
+  };
+
+  const lista = proyectos.filter((p) => filtroRent === "todas" ? true
+    : filtroRent === "entregado" ? p.estado === "entregado"
+    : !["entregado", "cancelado"].includes(p.estado));
+
+  if (!lista.length) {
+    $("#rent-datos", el).innerHTML = `<div class="panel"><p class="vacio">No hay órdenes de trabajo en este filtro.</p></div>`;
+    return;
+  }
+
+  const totales = lista.map(calcular);
+  const sumIngreso = totales.reduce((s, x) => s + x.ingreso, 0);
+  const sumCosto = totales.reduce((s, x) => s + x.costo, 0);
+  const sumHoras = totales.reduce((s, x) => s + x.minutos, 0) / 60;
+
+  $("#rent-datos", el).innerHTML = `
+    <div class="cifras">
+      <div class="cifra"><b>${lista.length}</b><span>Órdenes en el filtro</span></div>
+      <div class="cifra"><b>${pesos(sumIngreso)}</b><span>Ingreso o presupuesto</span></div>
+      <div class="cifra"><b>${pesos(sumCosto)}</b><span>Costo (material + mano de obra)</span></div>
+      <div class="cifra ${sumIngreso - sumCosto < 0 ? "cifra-alerta" : ""}"><b>${pesos(sumIngreso - sumCosto)}</b><span>Ganancia · ${sumHoras.toFixed(1)} horas trabajadas</span></div>
+    </div>
+
+    ${personas.every((p) => !Number(p.costo_hora)) ? `<div class="panel aviso-panel"><b>Falta el costo por hora.</b> Mientras los empleados no tengan costo por hora, la mano de obra aparece en cero y la ganancia sale inflada. Lo asignas en <b>Empleados → Editar</b>.</div>` : ""}
+
+    <div class="panel"><div class="tabla-wrap"><table>
+      <thead><tr><th>Orden</th><th>Procesos</th><th>Horas</th><th>Mano de obra</th><th>Materiales</th><th>Costo total</th><th>Ingreso</th><th>Ganancia</th><th>Margen</th><th></th></tr></thead>
+      <tbody>${lista.map((p, i) => {
+        const c = totales[i];
+        const cliente = clientes.find((x) => x.id === p.cliente_id)?.nombre;
+        return `<tr>
+          <td><b>${esc(p.titulo)}</b><span class="sub">${esc(cliente || "Sin cliente")} · ${ESTADO_PROYECTO[p.estado]?.texto || p.estado}</span></td>
+          <td>${c.mis.filter((t) => t.estado === "terminada").length}/${c.mis.length}</td>
+          <td>${(c.minutos / 60).toFixed(1)}</td>
+          <td>${pesos(c.manoObra)}</td>
+          <td>${pesos(c.materiales)}</td>
+          <td><b>${pesos(c.costo)}</b></td>
+          <td>${pesos(c.ingreso)}${c.esPresupuesto && c.ingreso ? `<span class="sub">presupuesto</span>` : c.ingreso ? `<span class="sub">facturado</span>` : `<span class="sub">sin definir</span>`}</td>
+          <td class="${c.ganancia >= 0 ? "texto-verde" : "texto-alerta"}"><b>${pesos(c.ganancia)}</b></td>
+          <td>${c.margen === null ? "—" : `<span class="chip ${c.margen >= 40 ? "chip-ok" : c.margen >= 20 ? "chip-aviso" : "chip-alerta"}">${c.margen.toFixed(0)}%</span>`}</td>
+          <td><button class="btn btn-chico btn-rojo" data-rent="${p.id}">Detalle</button></td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>
+    <p class="ayuda" style="margin-top:1rem">La mano de obra sale del tiempo real de las tareas por el costo por hora de cada empleado. Los materiales los cargas en el detalle de cada orden.</p>
+    </div>`;
+
+  $("#rent-datos", el).addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rent]");
+    if (!b) return;
+    const p = proyectos.find((x) => String(x.id) === b.dataset.rent);
+    modalDetalleRentabilidad(p, calcular(p), { tiempos, personas, costos, tareas }, recargar);
+  });
+}
+
+// ---------- Detalle de una orden: costos y precio sugerido ----------
+async function modalDetalleRentabilidad(p, c, datos, alCambiar) {
+  const [mp, cue] = await Promise.all([
+    sb.from("materias_primas").select("id,nombre,unidad,costo_unitario,cantidad").order("nombre"),
+    sb.from("cuentas").select("id,nombre").eq("activa", true)
+  ]);
+  const materias = mp.data || [];
+
+  const { fondo } = abrirModal({
+    titulo: `Rentabilidad · ${p.titulo}`,
+    sinPie: true, ancho: true,
+    cuerpo: `<div id="rent-det"></div>`
+  });
+
+  const pintar = async () => {
+    const { data: costos } = await sb.from("proyecto_costos").select("*").eq("proyecto_id", p.id).order("id");
+    const materiales = (costos || []).reduce((s, x) => s + Number(x.monto), 0);
+    const costoTotal = materiales + c.manoObra;
+    const sugerido50 = Math.round(costoTotal / 0.5);
+    const sugerido60 = Math.round(costoTotal / 0.4);
+
+    const porTarea = datos.tareas.filter((t) => t.proyecto_id === p.id).map((t) => {
+      const tramos = datos.tiempos.filter((x) => x.tarea_id === t.id);
+      const min = tramos.reduce((s, x) => s + ((x.fin ? new Date(x.fin) : new Date()) - new Date(x.inicio)) / 60000, 0);
+      const pausas = tramos.filter((x) => x.motivo_pausa && x.motivo_pausa !== "auto" && x.motivo_pausa !== "Trabajo terminado");
+      const persona = datos.personas.find((pp) => pp.id === (tramos[0] || {}).empleado_id || pp.id === t.empleado_id);
+      return { titulo: t.titulo, estado: t.estado, min, pausas, persona: persona?.nombre || "—",
+               costo: Math.round(min / 60 * Number(persona?.costo_hora || 0)) };
+    });
+
+    $("#rent-det", fondo).innerHTML = `
+      <div class="cifras">
+        <div class="cifra"><b>${pesos(costoTotal)}</b><span>Costo total</span></div>
+        <div class="cifra"><b>${pesos(c.ingreso)}</b><span>${c.esPresupuesto ? "Presupuesto" : "Facturado"}</span></div>
+        <div class="cifra ${c.ingreso - costoTotal < 0 ? "cifra-alerta" : ""}"><b>${pesos(c.ingreso - costoTotal)}</b><span>Ganancia</span></div>
+      </div>
+
+      <div class="panel">
+        <h2>Cuánto cobrar</h2>
+        <p class="ayuda">Con el costo actual de ${pesos(costoTotal)}:</p>
+        <div class="chips">
+          <span class="chip">50% de margen → <b>${pesos(sugerido50)}</b></span>
+          <span class="chip">60% de margen → <b>${pesos(sugerido60)}</b></span>
+        </div>
+        <div class="fila-form" style="margin-top:1rem">
+          <div class="campo"><label>Presupuesto de esta orden</label>
+            <input type="number" step="1000" min="0" id="pr-presupuesto" value="${Number(p.presupuesto) || ""}"></div>
+          <button class="btn" id="guardar-presupuesto">Guardar presupuesto</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Mano de obra · ${(c.minutos / 60).toFixed(1)} horas</h2>
+        <div class="tabla-wrap"><table>
+          <thead><tr><th>Proceso</th><th>Responsable</th><th>Tiempo</th><th>Costo</th><th>Interrupciones</th></tr></thead>
+          <tbody>${porTarea.map((t) => `<tr>
+            <td><b>${esc(t.titulo)}</b><span class="sub">${esc(t.estado)}</span></td>
+            <td>${esc(t.persona)}</td>
+            <td>${duracion(t.min)}</td>
+            <td>${pesos(t.costo)}</td>
+            <td><div class="chips">${t.pausas.map((x) => `<span class="chip chip-aviso">${esc(x.motivo_pausa)}</span>`).join("") || "—"}</div></td>
+          </tr>`).join("") || `<tr><td colspan="5"><span class="vacio">Sin procesos registrados.</span></td></tr>`}</tbody>
+        </table></div>
+      </div>
+
+      <div class="panel">
+        <h2>Materiales y otros costos · ${pesos(materiales)}</h2>
+        <div class="tabla-wrap">${(costos || []).length ? `<table>
+          <thead><tr><th>Tipo</th><th>Descripción</th><th>Cantidad</th><th>Monto</th><th></th></tr></thead>
+          <tbody>${costos.map((x) => `<tr>
+            <td>${esc(x.tipo)}</td><td>${esc(x.descripcion || "—")}</td>
+            <td>${Number(x.cantidad)}</td><td><b>${pesos(x.monto)}</b></td>
+            <td><button class="btn btn-chico btn-texto" data-borrar-costo="${x.id}">Eliminar</button></td>
+          </tr>`).join("")}</tbody></table>` : `<p class="vacio">Sin materiales cargados.</p>`}</div>
+
+        <h4 class="subtitulo">Cargar material del inventario</h4>
+        <div class="fila-form">
+          <div class="campo"><label>Material</label><select id="c-materia">
+            <option value="">Elegir…</option>
+            ${materias.map((m) => `<option value="${m.id}" data-costo="${m.costo_unitario}" data-uni="${esc(m.unidad || "")}">${esc(m.nombre)} · ${pesos(m.costo_unitario)}/${esc(m.unidad || "u")}</option>`).join("")}
+          </select></div>
+          <div class="campo"><label>Cantidad</label><input type="number" step="0.01" min="0" id="c-cant" value="1"></div>
+          <div class="campo"><label>Costo calculado</label><input id="c-monto" readonly value="0"></div>
+          <button class="btn btn-rojo" id="add-material">Cargar</button>
+        </div>
+        <p class="ayuda">Al cargarlo se descuenta del inventario de materias primas.</p>
+
+        <h4 class="subtitulo">Otro costo (sin inventario)</h4>
+        <div class="fila-form">
+          <div class="campo"><label>Tipo</label><select id="c-tipo">
+            ${["Material", "Servicio externo", "Transporte", "Otro"].map((t) => `<option>${t}</option>`).join("")}</select></div>
+          <div class="campo"><label>Descripción</label><input id="c-desc" placeholder="Ej: pintura de un tercero"></div>
+          <div class="campo"><label>Monto</label><input type="number" step="1000" min="0" id="c-otro-monto"></div>
+          <button class="btn" id="add-otro">Agregar</button>
+        </div>
+      </div>`;
+
+    const calcMonto = () => {
+      const sel = $("#c-materia", fondo).selectedOptions[0];
+      const costo = Number(sel?.dataset.costo || 0) * (Number($("#c-cant", fondo).value) || 0);
+      $("#c-monto", fondo).value = Math.round(costo);
+    };
+    $("#c-materia", fondo).addEventListener("change", calcMonto);
+    $("#c-cant", fondo).addEventListener("input", calcMonto);
+
+    $("#guardar-presupuesto", fondo).addEventListener("click", async () => {
+      const v = Number($("#pr-presupuesto", fondo).value) || 0;
+      const { error } = await sb.from("proyectos").update({ presupuesto: v }).eq("id", p.id);
+      if (error) return toast(traducirError(error), "error");
+      p.presupuesto = v; c.ingreso = c.esPresupuesto ? v : c.ingreso;
+      toast("Presupuesto guardado"); pintar(); alCambiar();
+    });
+
+    $("#add-material", fondo).addEventListener("click", async () => {
+      const sel = $("#c-materia", fondo).selectedOptions[0];
+      const id = Number($("#c-materia", fondo).value);
+      const cant = Number($("#c-cant", fondo).value) || 0;
+      if (!id || cant <= 0) return toast("Elige el material y la cantidad.", "error");
+      const monto = Math.round(Number(sel.dataset.costo || 0) * cant);
+      const { error } = await sb.from("proyecto_costos").insert({
+        proyecto_id: p.id, tipo: "Material", descripcion: sel.textContent.split(" · ")[0],
+        cantidad: cant, monto, materia_id: id
+      });
+      if (error) return toast(traducirError(error), "error");
+      const mov = await sb.from("movimientos").insert({
+        tipo_item: "materia_prima", item_id: id, cantidad: -cant,
+        motivo: `Orden: ${p.titulo}`, proyecto_id: p.id
+      });
+      if (mov.error) toast("El costo quedó cargado, pero el inventario no se descontó.", "error");
+      toast(`Material cargado · ${pesos(monto)}`);
+      pintar(); alCambiar();
+    });
+
+    $("#add-otro", fondo).addEventListener("click", async () => {
+      const monto = Number($("#c-otro-monto", fondo).value) || 0;
+      if (monto <= 0) return toast("Escribe el monto.", "error");
+      const { error } = await sb.from("proyecto_costos").insert({
+        proyecto_id: p.id, tipo: $("#c-tipo", fondo).value,
+        descripcion: $("#c-desc", fondo).value.trim() || null, cantidad: 1, monto
+      });
+      if (error) return toast(traducirError(error), "error");
+      toast("Costo agregado"); pintar(); alCambiar();
+    });
+
+    $("#rent-det", fondo).addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-borrar-costo]");
+      if (!b || !confirm("¿Eliminar este costo? El inventario no se devuelve solo.")) return;
+      const { error } = await sb.from("proyecto_costos").delete().eq("id", b.dataset.borrarCosto);
+      if (error) return toast(traducirError(error), "error");
+      toast("Costo eliminado"); pintar(); alCambiar();
+    });
+  };
+  pintar();
 }
 
 // ---------- Arranque ----------

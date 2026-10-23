@@ -258,6 +258,10 @@ details[open] summary::after { content: " −"; }
   .cal-col { min-height: 0; }
 }
 
+.link-mini { background: none; border: 0; color: var(--rojo); cursor: pointer; font-size: .8rem; font-weight: 600; padding: 0 0 0 .4rem; text-decoration: underline; }
+.link-mini:hover { color: var(--blanco); }
+.campo label { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+
 /* ---------- Celular ---------- */
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }

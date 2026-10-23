@@ -3487,6 +3487,7 @@ const ESTADO_PROYECTO = {
 };
 
 async function panelProyectos(cont) {
+  await cargarOpciones();
   cont.innerHTML = `<div class="panel"><p class="vacio">Cargando…</p></div>`;
   const [pro, tar, tie, cli, veh, per] = await Promise.all([
     sb.from("proyectos").select("*").order("id", { ascending: false }).limit(200),
@@ -3608,9 +3609,11 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
     cuerpo: `<div class="campo"><label>Título *</label>
         <input name="titulo" required placeholder="Ej: Mazda 3 ABC123 · Andrés Gómez" value="${esc(p?.titulo ?? "")}"></div>
       <div class="rejilla">
-        <div class="campo"><label>Cliente</label><select name="cliente_id"><option value="">—</option>
+        <div class="campo"><label>Cliente <button type="button" class="link-mini" id="pr-nuevo-cli">+ Nuevo cliente</button></label>
+          <select name="cliente_id"><option value="">—</option>
           ${clientes.map((c) => `<option value="${c.id}" ${p?.cliente_id === c.id ? "selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select></div>
-        <div class="campo"><label>Vehículo</label><select name="vehiculo_id"><option value="">—</option></select></div>
+        <div class="campo"><label>Vehículo <button type="button" class="link-mini" id="pr-nuevo-veh">+ Nuevo vehículo</button></label>
+          <select name="vehiculo_id"><option value="">—</option></select></div>
         <div class="campo"><label>Fecha de inicio *</label><input type="date" name="fecha_inicio" required value="${p?.fecha_inicio ?? hoyISO()}"></div>
         <div class="campo"><label>Fecha de entrega *</label><input type="date" name="fecha_entrega" required value="${p?.fecha_entrega ?? ""}"></div>
         ${nuevo ? "" : `<div class="campo"><label>Estado</label><select name="estado">
@@ -3656,6 +3659,80 @@ function formProyecto(p, clientes, vehiculos, alGuardar) {
   pintarAutos();
   selCli.addEventListener("change", () => { pintarAutos(); sugerirTitulo(); });
   selVeh.addEventListener("change", sugerirTitulo);
+
+  // Crear el cliente (y su carro) sin salir de la orden de trabajo
+  $("#pr-nuevo-cli", modal.form).addEventListener("click", () => {
+    abrirModal({
+      titulo: "Nuevo cliente",
+      botonTexto: "Crear y seleccionar",
+      cuerpo: `<div class="rejilla">
+          <div class="campo"><label>Nombre *</label><input name="nombre" required></div>
+          <div class="campo"><label>Teléfono</label><input name="telefono" type="tel"></div>
+          <div class="campo"><label>¿Cómo nos conoció?</label>${selectOps("canal_origen", "canal_origen")}</div>
+        </div>
+        <h4 class="subtitulo">Su vehículo (opcional)</h4>
+        <div class="rejilla">
+          <div class="campo"><label>Tipo</label>${selectOps("tipo", "tipo_vehiculo", "Automóvil")}</div>
+          <div class="campo"><label>Marca</label><input name="marca" placeholder="Mazda"></div>
+          <div class="campo"><label>Referencia</label><input name="referencia" placeholder="Mazda 3"></div>
+          <div class="campo"><label>Año</label><input name="anio" placeholder="2019"></div>
+          <div class="campo"><label>Placa</label><input name="placa" placeholder="ABC123"></div>
+        </div>
+        <p class="ayuda">Después puedes completar documento, correo y dirección desde la sección Clientes.</p>`,
+      alGuardar: async (d) => {
+        const { data: c, error } = await sb.from("clientes").insert({
+          nombre: d.nombre.trim(), telefono: d.telefono.trim() || null, canal_origen: d.canal_origen || null
+        }).select("*").single();
+        if (error) { toast(traducirError(error), "error"); return false; }
+        clientes.push(c);
+        selCli.insertAdjacentHTML("beforeend", `<option value="${c.id}">${esc(c.nombre)}</option>`);
+        selCli.value = String(c.id);
+
+        if (d.marca.trim() || d.placa.trim()) {
+          const { data: v, error: e2 } = await sb.from("vehiculos").insert({
+            cliente_id: c.id, tipo: d.tipo || null, marca: d.marca.trim() || null,
+            referencia: d.referencia.trim() || null, anio: d.anio.trim() || null,
+            placa: d.placa.trim().toUpperCase() || null
+          }).select("*").single();
+          if (e2) toast("El cliente se creó, pero el vehículo no: " + traducirError(e2), "error");
+          else { vehiculos.push(v); pintarAutos(); selVeh.value = String(v.id); }
+        } else pintarAutos();
+
+        sugerirTitulo();
+        toast(`Cliente ${c.nombre} creado`);
+        return true;
+      }
+    });
+  });
+
+  // Agregarle otro vehículo a un cliente que ya existe
+  $("#pr-nuevo-veh", modal.form).addEventListener("click", () => {
+    if (!selCli.value) return toast("Primero elige o crea el cliente.", "error");
+    abrirModal({
+      titulo: "Nuevo vehículo",
+      botonTexto: "Crear y seleccionar",
+      cuerpo: `<div class="rejilla">
+          <div class="campo"><label>Tipo</label>${selectOps("tipo", "tipo_vehiculo", "Automóvil")}</div>
+          <div class="campo"><label>Marca *</label><input name="marca" required placeholder="Mazda"></div>
+          <div class="campo"><label>Referencia</label><input name="referencia" placeholder="Mazda 3"></div>
+          <div class="campo"><label>Año</label><input name="anio" placeholder="2019"></div>
+          <div class="campo"><label>Placa</label><input name="placa" placeholder="ABC123"></div>
+          <div class="campo"><label>Color</label><input name="color"></div>
+        </div>`,
+      alGuardar: async (d) => {
+        const { data: v, error } = await sb.from("vehiculos").insert({
+          cliente_id: Number(selCli.value), tipo: d.tipo || null, marca: d.marca.trim(),
+          referencia: d.referencia.trim() || null, anio: d.anio.trim() || null,
+          placa: d.placa.trim().toUpperCase() || null, color: d.color.trim() || null
+        }).select("*").single();
+        if (error) { toast(traducirError(error), "error"); return false; }
+        vehiculos.push(v); pintarAutos(); selVeh.value = String(v.id);
+        sugerirTitulo();
+        toast("Vehículo agregado");
+        return true;
+      }
+    });
+  });
 }
 
 // =====================================================
